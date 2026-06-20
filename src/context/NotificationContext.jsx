@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react'
 import { useData } from './DataContext'
+import { useToast } from './ToastContext'
 import { reminderFireTime, toDate, fmtDateTime } from '../lib/utils'
 
 const NotificationContext = createContext(null)
@@ -9,13 +10,14 @@ const KEY_FIRED = 'ge_fired_notifs'
 const KEY_ENABLED = 'ge_notif_enabled'
 const KEY_ASKED = 'ge_notif_asked'
 const POLL_MS = 30000
-const ICON =
-  "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%236366f1'/%3E%3Cpath d='M9 21V11l7 6 7-6v10' stroke='white' stroke-width='2.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"
 
 const supported = typeof window !== 'undefined' && 'Notification' in window
+const dev = import.meta.env.DEV
+const log = (...a) => dev && console.log('[GE notif]', ...a)
 
 export function NotificationProvider({ children }) {
   const { tasks, clientById } = useData()
+  const { toast } = useToast()
   const [permission, setPermission] = useState(supported ? Notification.permission : 'unsupported')
   const [enabled, setEnabled] = useState(() => localStorage.getItem(KEY_ENABLED) !== 'false')
 
@@ -29,6 +31,30 @@ export function NotificationProvider({ children }) {
     localStorage.setItem(KEY_FIRED, JSON.stringify(arr))
   }
 
+  // Keep the displayed permission in sync if the user changes it in browser
+  // settings while the tab is open (otherwise React state goes stale).
+  useEffect(() => {
+    if (!supported) return
+    const refresh = () => setPermission(Notification.permission)
+    window.addEventListener('focus', refresh)
+    document.addEventListener('visibilitychange', refresh)
+    let permStatus
+    if (navigator.permissions?.query) {
+      navigator.permissions
+        .query({ name: 'notifications' })
+        .then((s) => {
+          permStatus = s
+          s.onchange = () => setPermission(Notification.permission)
+        })
+        .catch(() => {})
+    }
+    return () => {
+      window.removeEventListener('focus', refresh)
+      document.removeEventListener('visibilitychange', refresh)
+      if (permStatus) permStatus.onchange = null
+    }
+  }, [])
+
   const requestPermission = useCallback(async () => {
     if (!supported) return 'unsupported'
     try {
@@ -36,7 +62,7 @@ export function NotificationProvider({ children }) {
       setPermission(p)
       return p
     } catch {
-      return Notification.permission
+      return supported ? Notification.permission : 'unsupported'
     }
   }, [])
 
@@ -45,29 +71,65 @@ export function NotificationProvider({ children }) {
     localStorage.setItem(KEY_ENABLED, v ? 'true' : 'false')
   }, [])
 
-  const show = useCallback((title, body, tag) => {
-    if (!supported || Notification.permission !== 'granted') return false
+  // Core: construct a browser Notification with MINIMAL options (no SVG icon —
+  // SVG icons can silently prevent display in Chrome). Returns {ok, reason}.
+  const notify = useCallback((title, body, tag) => {
+    if (!supported) return { ok: false, reason: 'Notifications not supported in this browser' }
+    const perm = Notification.permission
+    if (perm === 'denied') return { ok: false, reason: 'blocked' }
+    if (perm !== 'granted') return { ok: false, reason: 'permission not granted' }
     try {
-      new Notification(title, { body, tag, icon: ICON, badge: ICON })
-      return true
-    } catch {
-      return false
+      const opts = tag ? { body, tag } : { body }
+      const n = new Notification(title, opts)
+      return { ok: Boolean(n), reason: undefined, notification: n }
+    } catch (e) {
+      return { ok: false, reason: e?.message || 'Notification constructor threw' }
     }
   }, [])
 
-  // Manual "test notification" used from Settings
-  const sendTest = useCallback(() => show('GrowthifyEdge OS Reminder', 'Notifications are working ✓\nYou\'ll be reminded about your tasks here.', 'ge-test'), [show])
+  // Settings "Send test" — directly triggers a real notification with full feedback.
+  const sendTest = useCallback(async () => {
+    log('Send test clicked', {
+      'Notification.permission': supported ? Notification.permission : 'unsupported',
+      'typeof window.Notification': typeof window.Notification,
+      'window.isSecureContext': typeof window !== 'undefined' ? window.isSecureContext : 'n/a',
+    })
+    if (!supported) {
+      toast('Notifications are not supported in this browser', 'error')
+      return { ok: false, reason: 'unsupported' }
+    }
+    let perm = Notification.permission
+    if (perm === 'default') perm = await requestPermission()
+    if (perm === 'denied') {
+      toast('Notifications blocked — allow them in your browser settings', 'error')
+      return { ok: false, reason: 'blocked' }
+    }
+    if (perm !== 'granted') {
+      toast('Notification permission was not granted', 'error')
+      return { ok: false, reason: 'not granted' }
+    }
+    const res = notify('GrowthifyEdge OS Reminder', 'Test notification from GrowthifyEdge OS')
+    log('new Notification() result', res)
+    if (res.ok) toast('Test notification sent')
+    else toast(`Notification failed: ${res.reason}`, 'error')
+    return res
+  }, [notify, requestPermission, toast])
 
   // Request permission once on first launch
   useEffect(() => {
     if (!supported) return
+    log('mounted', {
+      permission: Notification.permission,
+      typeofNotification: typeof window.Notification,
+      isSecureContext: window.isSecureContext,
+    })
     if (Notification.permission === 'default' && !localStorage.getItem(KEY_ASKED)) {
       localStorage.setItem(KEY_ASKED, '1')
       Notification.requestPermission().then(setPermission).catch(() => {})
     }
   }, [])
 
-  // Scheduler: poll for tasks crossing their reminder / due / overdue moments.
+  // Scheduler: poll every 30s for tasks crossing reminder / due / overdue moments.
   useEffect(() => {
     if (!supported) return
 
@@ -75,7 +137,12 @@ export function NotificationProvider({ children }) {
       if (firedRef.current.has(key)) return
       firedRef.current.add(key)
       persistFired()
-      show(title, body, key)
+      const res = notify(title, body, key)
+      log('fired', { key, title, browserOk: res.ok, reason: res.reason })
+      // Always surface an in-app toast — this is the fallback if the browser
+      // notification fails for any reason, and confirms the scheduler triggered.
+      const taskName = body.split('\n')[0]
+      toast(`🔔 ${title.replace(/^[^\w]+/, '')}: ${taskName}`, res.ok ? 'info' : 'error')
     }
     const crossed = (time, since, now) => time != null && time > since && time <= now
 
@@ -96,29 +163,21 @@ export function NotificationProvider({ children }) {
         const rt = reminderFireTime(t)?.getTime()
         if (crossed(rt, since, now)) fireOnce(`${t.id}|reminder|${rt}`, 'GrowthifyEdge OS Reminder', body)
         if (crossed(due, since, now)) fireOnce(`${t.id}|due|${due}`, '⏰ Task due now', body)
-        // Overdue fires a minute after the due moment so it is distinct from "due".
         if (crossed(due + 60000, since, now)) fireOnce(`${t.id}|overdue|${due}`, '⚠️ Task overdue', body)
       }
       lastCheckRef.current = now
     }
 
+    log('scheduler started', { tasks: tasks.length, enabled, permission: Notification.permission })
     check()
     const id = setInterval(check, POLL_MS)
 
     // Dev-only test seam (stripped from production builds).
-    if (import.meta.env.DEV) {
-      window.__geNotif = { check, setLastCheck: (t) => (lastCheckRef.current = t) }
-    }
-    return () => clearInterval(id)
-  }, [tasks, clientById, enabled, show])
+    if (dev) window.__geNotif = { check, notify, setLastCheck: (t) => (lastCheckRef.current = t) }
 
-  const value = {
-    supported,
-    permission,
-    enabled,
-    requestPermission,
-    setEnabled: setEnabledPersist,
-    sendTest,
-  }
+    return () => clearInterval(id)
+  }, [tasks, clientById, enabled, notify, toast])
+
+  const value = { supported, permission, enabled, requestPermission, setEnabled: setEnabledPersist, notify, sendTest }
   return <NotificationContext.Provider value={value}>{children}</NotificationContext.Provider>
 }

@@ -106,16 +106,60 @@ export default function Settings() {
             <p className="flex items-center gap-2 rounded-xl bg-surface-2 px-3 py-2.5 text-sm text-muted">
               <BellOff className="h-4 w-4" /> This browser doesn't support notifications.
             </p>
-          ) : notif.permission === 'granted' ? (
+          ) : (
             <div className="space-y-4">
-              <div className="flex items-center justify-between rounded-xl bg-emerald-500/10 px-3 py-2.5">
-                <span className="flex items-center gap-2 text-sm font-medium text-emerald-600 dark:text-emerald-400">
-                  <BellRing className="h-4 w-4" /> Notifications enabled
+              {/* Status + actions (Send test is always available) */}
+              <div
+                className={cn(
+                  'flex flex-wrap items-center justify-between gap-3 rounded-xl px-3 py-2.5',
+                  notif.permission === 'granted'
+                    ? 'bg-emerald-500/10'
+                    : notif.permission === 'denied'
+                      ? 'bg-amber-500/10'
+                      : 'bg-surface-2',
+                )}
+              >
+                <span
+                  className={cn(
+                    'flex items-center gap-2 text-sm font-medium',
+                    notif.permission === 'granted'
+                      ? 'text-emerald-600 dark:text-emerald-400'
+                      : notif.permission === 'denied'
+                        ? 'text-amber-700 dark:text-amber-300'
+                        : 'text-muted',
+                  )}
+                >
+                  {notif.permission === 'granted' ? <BellRing className="h-4 w-4" /> : <Bell className="h-4 w-4" />}
+                  {notif.permission === 'granted'
+                    ? 'Notifications enabled'
+                    : notif.permission === 'denied'
+                      ? 'Blocked — allow in browser settings'
+                      : 'Not enabled yet'}
                 </span>
-                <Button variant="ghost" onClick={() => (notif.sendTest() ? toast('Test notification sent') : toast('Could not send', 'error'))}>
-                  Send test
-                </Button>
+                <div className="flex gap-2">
+                  {notif.permission !== 'granted' && (
+                    <Button
+                      onClick={async () => {
+                        const p = await notif.requestPermission()
+                        if (p === 'granted') toast('Notifications enabled')
+                        else if (p === 'denied') toast('Notifications blocked in your browser', 'error')
+                      }}
+                    >
+                      <Bell className="h-4 w-4" /> Enable
+                    </Button>
+                  )}
+                  <Button variant="ghost" onClick={() => notif.sendTest()}>
+                    Send test
+                  </Button>
+                </div>
               </div>
+
+              {notif.permission === 'denied' && (
+                <p className="text-xs text-muted">
+                  Tip: click the lock/🔔 icon in the address bar → <strong>Notifications → Allow</strong>, then reload.
+                </p>
+              )}
+
               <div className="flex items-center justify-between">
                 <div>
                   <div className="text-sm font-semibold text-fg">Task reminders</div>
@@ -124,21 +168,6 @@ export default function Settings() {
                 <Switch checked={notif.enabled} onChange={notif.setEnabled} />
               </div>
             </div>
-          ) : notif.permission === 'denied' ? (
-            <p className="flex items-start gap-2 rounded-xl bg-amber-500/10 px-3 py-2.5 text-sm text-amber-700 dark:text-amber-300">
-              <BellOff className="mt-0.5 h-4 w-4 shrink-0" />
-              Notifications are blocked. Enable them for this site in your browser's site settings (lock icon → Notifications → Allow), then reload.
-            </p>
-          ) : (
-            <Button
-              onClick={async () => {
-                const p = await notif.requestPermission()
-                if (p === 'granted') toast('Notifications enabled')
-                else if (p === 'denied') toast('Notifications blocked in your browser', 'error')
-              }}
-            >
-              <Bell className="h-4 w-4" /> Enable notifications
-            </Button>
           )}
         </Card>
 
