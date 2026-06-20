@@ -1,0 +1,333 @@
+import { createContext, useContext, useEffect, useMemo, useState, useCallback } from 'react'
+import { addDays, addWeeks, addMonths } from 'date-fns'
+import { db, getDataSource } from '../lib/db'
+import { useAuth } from './AuthContext'
+import { useToast } from './ToastContext'
+import { buildSeed, defaultSettings } from '../lib/seed'
+import { uid, nowISO, toDate } from '../lib/utils'
+
+const DataContext = createContext(null)
+export const useData = () => useContext(DataContext)
+
+const EMPTY = { clients: [], projects: [], tasks: [], files: [], meetings: [], approvals: [], activity: [] }
+
+const LABEL_KEY = { clients: 'company', projects: 'name', tasks: 'title', meetings: 'title', approvals: 'title', files: 'name' }
+const ACTIVITY_TYPE = { clients: 'client', projects: 'project', tasks: 'task', meetings: 'meeting', approvals: 'approval', files: 'file' }
+
+export function DataProvider({ children }) {
+  const { userId, status: authStatus } = useAuth()
+  const { toast } = useToast()
+  const [data, setData] = useState(EMPTY)
+  const [settings, setSettings] = useState(defaultSettings())
+  const [loading, setLoading] = useState(true)
+  const isLocal = getDataSource() === 'local'
+
+  // ── Initial load (per signed-in user); seed only in local mode ─────────────
+  useEffect(() => {
+    if (authStatus === 'loading') return
+    if (authStatus === 'anon') {
+      setData(EMPTY)
+      setLoading(false)
+      return
+    }
+    let alive = true
+    setLoading(true)
+    ;(async () => {
+      try {
+        await db.ready()
+        const loaded = {}
+        for (const c of Object.keys(EMPTY)) loaded[c] = await db.getAll(c)
+        let s = await db.getSettings()
+
+        const isEmpty = Object.values(loaded).every((arr) => !arr || arr.length === 0)
+        if (isEmpty && isLocal) {
+          const seed = buildSeed()
+          for (const c of Object.keys(seed)) {
+            await db.setAll(c, seed[c])
+            loaded[c] = seed[c]
+          }
+          loaded.files = []
+          s = defaultSettings()
+          await db.saveSettings(s)
+        }
+        if (!alive) return
+        setData({ ...EMPTY, ...loaded })
+        if (s) setSettings((prev) => ({ ...prev, ...s, profile: { ...prev.profile, ...(s.profile || {}) } }))
+      } catch (e) {
+        console.error('Data load failed', e)
+        toast?.('Could not load your data', 'error')
+      } finally {
+        if (alive) setLoading(false)
+      }
+    })()
+    return () => {
+      alive = false
+    }
+  }, [authStatus, userId, isLocal]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Activity log ────────────────────────────────────────────────────────────
+  const logActivity = useCallback(
+    (type, action, entity) => {
+      const item = { id: uid('av'), user_id: userId, type, action, entity, at: nowISO() }
+      db.put('activity', item).catch(() => {})
+      setData((d) => ({ ...d, activity: [item, ...d.activity].slice(0, 60) }))
+    },
+    [userId],
+  )
+
+  // ── Generic per-record CRUD ─────────────────────────────────────────────────
+  const create = useCallback(
+    async (collection, payload) => {
+      const record = { id: uid(collection.slice(0, 2)), user_id: userId, createdAt: nowISO(), ...payload }
+      setData((d) => ({ ...d, [collection]: [record, ...d[collection]] }))
+      await db.put(collection, record).catch((e) => console.error(e))
+      logActivity(ACTIVITY_TYPE[collection], 'created', record[LABEL_KEY[collection]] || 'item')
+      return record
+    },
+    [userId, logActivity],
+  )
+
+  const update = useCallback(
+    async (collection, id, patch, opts = {}) => {
+      let updated = null
+      setData((d) => {
+        const next = d[collection].map((r) => (r.id === id ? (updated = { ...r, ...patch, updatedAt: nowISO() }) : r))
+        return { ...d, [collection]: next }
+      })
+      if (updated) await db.put(collection, updated).catch((e) => console.error(e))
+      if (opts.activity) logActivity(ACTIVITY_TYPE[collection], opts.activity, updated?.[LABEL_KEY[collection]] || 'item')
+      return updated
+    },
+    [logActivity],
+  )
+
+  const remove = useCallback(
+    async (collection, id) => {
+      let label = 'item'
+      setData((d) => {
+        label = d[collection].find((r) => r.id === id)?.[LABEL_KEY[collection]] || 'item'
+        return { ...d, [collection]: d[collection].filter((r) => r.id !== id) }
+      })
+      await db.remove(collection, id).catch((e) => console.error(e))
+      logActivity(ACTIVITY_TYPE[collection], 'deleted', label)
+    },
+    [logActivity],
+  )
+
+  // ── Bulk operations (used by Tasks bulk management) ─────────────────────────
+  const bulkUpdate = useCallback(
+    async (collection, ids, patchOrFn) => {
+      const idSet = new Set(ids)
+      const changed = data[collection]
+        .filter((r) => idSet.has(r.id))
+        .map((r) => ({ ...r, ...(typeof patchOrFn === 'function' ? patchOrFn(r) : patchOrFn), updatedAt: nowISO() }))
+      const byId = Object.fromEntries(changed.map((r) => [r.id, r]))
+      setData((d) => ({ ...d, [collection]: d[collection].map((r) => byId[r.id] || r) }))
+      for (const r of changed) await db.put(collection, r).catch((e) => console.error(e))
+      return changed
+    },
+    [data],
+  )
+
+  const bulkRemove = useCallback(async (collection, ids) => {
+    const idSet = new Set(ids)
+    setData((d) => ({ ...d, [collection]: d[collection].filter((r) => !idSet.has(r.id)) }))
+    for (const id of ids) await db.remove(collection, id).catch((e) => console.error(e))
+  }, [])
+
+  // Null out references in related rows (non-destructive cascade)
+  const nullRefs = useCallback(async (collection, field, value) => {
+    const changed = []
+    setData((d) => {
+      const next = d[collection].map((r) => {
+        if (r[field] === value) {
+          const u = { ...r, [field]: null, updatedAt: nowISO() }
+          changed.push(u)
+          return u
+        }
+        return r
+      })
+      return { ...d, [collection]: next }
+    })
+    for (const r of changed) await db.put(collection, r).catch(() => {})
+  }, [])
+
+  const removeClient = useCallback(
+    async (id) => {
+      for (const col of ['projects', 'tasks', 'meetings', 'approvals', 'files']) await nullRefs(col, 'clientId', id)
+      await remove('clients', id)
+    },
+    [nullRefs, remove],
+  )
+
+  const removeProject = useCallback(
+    async (id) => {
+      for (const col of ['tasks', 'files', 'approvals']) await nullRefs(col, 'projectId', id)
+      await remove('projects', id)
+    },
+    [nullRefs, remove],
+  )
+
+  // ── Task status with dependency blocking + recurrence spawning ──────────────
+  const spawnNextOccurrence = useCallback(
+    async (task) => {
+      const base = toDate(task.dueDate) || new Date()
+      let next
+      if (task.recurrence === 'daily') next = addDays(base, 1)
+      else if (task.recurrence === 'weekly') next = addWeeks(base, 1)
+      else if (task.recurrence === 'monthly') next = addMonths(base, 1)
+      else if (task.recurrence === 'custom') next = addDays(base, Number(task.recurrenceInterval) || 1)
+      else return
+      if (task.recurrenceUntil && next > toDate(task.recurrenceUntil)) return
+      await create('tasks', {
+        title: task.title,
+        description: task.description,
+        clientId: task.clientId || null,
+        projectId: task.projectId || null,
+        category: task.category,
+        priority: task.priority,
+        status: 'pending',
+        dueDate: next.toISOString(),
+        notes: task.notes,
+        tags: task.tags || [],
+        dependencies: [],
+        recurrence: task.recurrence,
+        recurrenceInterval: task.recurrenceInterval || null,
+        recurrenceUntil: task.recurrenceUntil || null,
+        // Carry the reminder preset forward; a fixed custom time can't apply to a new date.
+        reminder: task.reminder === 'custom' ? 'none' : task.reminder || 'none',
+        reminderCustomAt: null,
+        completedAt: null,
+        attachments: [],
+      })
+      toast?.('Next occurrence scheduled', 'info')
+    },
+    [create, toast],
+  )
+
+  const isBlocked = useCallback(
+    (task, tasksList) => (task.dependencies || []).some((depId) => tasksList.find((t) => t.id === depId)?.status !== 'done'),
+    [],
+  )
+
+  const setTaskStatus = useCallback(
+    async (id, status) => {
+      const task = data.tasks.find((t) => t.id === id)
+      if (!task) return
+      if (status === 'done') {
+        const blockers = (task.dependencies || []).filter((depId) => {
+          const dep = data.tasks.find((t) => t.id === depId)
+          return dep && dep.status !== 'done'
+        })
+        if (blockers.length) {
+          toast?.(`Blocked — finish ${blockers.length} dependency task${blockers.length > 1 ? 's' : ''} first`, 'error')
+          return
+        }
+      }
+      const patch = { status, completedAt: status === 'done' ? nowISO() : null }
+      await update('tasks', id, patch, { activity: status === 'done' ? 'completed' : undefined })
+      if (status === 'done' && task.recurrence && task.recurrence !== 'none') await spawnNextOccurrence(task)
+    },
+    [data.tasks, update, spawnNextOccurrence, toast],
+  )
+
+  // ── Files (record + blob in storage) ────────────────────────────────────────
+  const addFile = useCallback(
+    async (meta, blob) => {
+      const id = uid('file')
+      const storagePath = isLocal ? id : `${userId}/${id}`
+      if (blob) await db.saveBlob(storagePath, blob).catch((e) => console.error(e))
+      const record = { id, user_id: userId, storagePath, createdAt: nowISO(), ...meta }
+      setData((d) => ({ ...d, files: [record, ...d.files] }))
+      await db.put('files', record).catch((e) => console.error(e))
+      logActivity('file', 'uploaded', record.name || 'file')
+      return record
+    },
+    [userId, isLocal, logActivity],
+  )
+
+  const removeFile = useCallback(
+    async (id) => {
+      const file = data.files.find((f) => f.id === id)
+      if (file) await db.removeBlob(file.storagePath || file.id).catch(() => {})
+      await remove('files', id)
+    },
+    [data.files, remove],
+  )
+
+  const getFileUrl = useCallback((file) => db.getFileUrl(file), [])
+
+  // ── Settings ────────────────────────────────────────────────────────────────
+  const updateSettings = useCallback(async (patch) => {
+    setSettings((s) => {
+      const next = { ...s, ...patch, profile: { ...s.profile, ...(patch.profile || {}) } }
+      db.saveSettings(next).catch(() => {})
+      return next
+    })
+  }, [])
+
+  // ── Backup / restore / reset ────────────────────────────────────────────────
+  const exportBackup = useCallback(async () => db.exportAll(), [])
+  const importBackup = useCallback(async (payload) => {
+    await db.importAll(payload)
+    const loaded = {}
+    for (const c of Object.keys(EMPTY)) loaded[c] = await db.getAll(c)
+    setData({ ...EMPTY, ...loaded })
+    const s = await db.getSettings()
+    if (s) setSettings((prev) => ({ ...prev, ...s }))
+  }, [])
+
+  const resetWorkspace = useCallback(
+    async (withDemo = true) => {
+      await db.clearAll()
+      if (withDemo && isLocal) {
+        const seed = buildSeed()
+        for (const c of Object.keys(seed)) await db.setAll(c, seed[c])
+        const s = defaultSettings()
+        await db.saveSettings(s)
+        setData({ ...EMPTY, ...seed, files: [] })
+        setSettings(s)
+      } else {
+        setData(EMPTY)
+      }
+    },
+    [isLocal],
+  )
+
+  const clientById = useMemo(() => Object.fromEntries(data.clients.map((c) => [c.id, c])), [data.clients])
+  const projectById = useMemo(() => Object.fromEntries(data.projects.map((p) => [p.id, p])), [data.projects])
+  const taskById = useMemo(() => Object.fromEntries(data.tasks.map((t) => [t.id, t])), [data.tasks])
+  const allTags = useMemo(
+    () => [...new Set(data.tasks.flatMap((t) => t.tags || []))].sort((a, b) => a.localeCompare(b)),
+    [data.tasks],
+  )
+
+  const value = {
+    ...data,
+    settings,
+    loading,
+    clientById,
+    projectById,
+    taskById,
+    allTags,
+    create,
+    update,
+    remove,
+    bulkUpdate,
+    bulkRemove,
+    setTaskStatus,
+    isBlocked,
+    removeClient,
+    removeProject,
+    addFile,
+    removeFile,
+    getFileUrl,
+    updateSettings,
+    logActivity,
+    exportBackup,
+    importBackup,
+    resetWorkspace,
+  }
+
+  return <DataContext.Provider value={value}>{children}</DataContext.Provider>
+}
