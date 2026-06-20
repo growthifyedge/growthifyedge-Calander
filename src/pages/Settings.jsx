@@ -54,6 +54,44 @@ export default function Settings() {
     setTimeout(() => window.location.reload(), 600)
   }
 
+  // Self-contained test notification — does NOT depend on NotificationContext.
+  // Mirrors a plain `new Notification(...)` exactly (no icon/badge/etc).
+  // Note: our toast API is toast(message, type) — not toast.error()/.success().
+  async function sendDirectTestNotification() {
+    try {
+      console.log('[GE Notification Debug] Button clicked')
+      console.log('[GE Notification Debug] Notification available:', 'Notification' in window)
+      console.log('[GE Notification Debug] Permission:', 'Notification' in window ? Notification.permission : 'n/a')
+      console.log('[GE Notification Debug] Secure context:', window.isSecureContext)
+
+      if (!('Notification' in window)) {
+        toast('This browser does not support notifications', 'error')
+        return
+      }
+
+      let permission = Notification.permission
+      if (permission === 'default') {
+        permission = await Notification.requestPermission()
+        console.log('[GE Notification Debug] Permission after request:', permission)
+      }
+
+      if (permission !== 'granted') {
+        toast('Notifications are blocked or not allowed', 'error')
+        return
+      }
+
+      const notification = new Notification('GrowthifyEdge OS Reminder', {
+        body: 'Test notification from GrowthifyEdge OS',
+      })
+
+      console.log('[GE Notification Debug] Notification created:', notification)
+      toast('Test notification sent', 'success')
+    } catch (error) {
+      console.error('[GE Notification Debug] Notification failed:', error)
+      toast('Notification failed: ' + (error?.message || error), 'error')
+    }
+  }
+
   return (
     <div className="max-w-3xl">
       <PageHeader title="Settings" subtitle="Personalise your workspace and manage your data." />
@@ -148,7 +186,7 @@ export default function Settings() {
                       <Bell className="h-4 w-4" /> Enable
                     </Button>
                   )}
-                  <Button variant="ghost" onClick={() => notif.sendTest()}>
+                  <Button variant="ghost" onClick={sendDirectTestNotification}>
                     Send test
                   </Button>
                 </div>

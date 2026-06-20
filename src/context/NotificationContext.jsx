@@ -13,7 +13,8 @@ const POLL_MS = 30000
 
 const supported = typeof window !== 'undefined' && 'Notification' in window
 const dev = import.meta.env.DEV
-const log = (...a) => dev && console.log('[GE notif]', ...a)
+// NOTE: notification logs intentionally run in PRODUCTION too (temporary debugging).
+const log = (...a) => console.log('[GE notif]', ...a)
 
 export function NotificationProvider({ children }) {
   const { tasks, clientById } = useData()
