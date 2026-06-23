@@ -103,7 +103,6 @@ export function DataProvider({ children }) {
       // save actually succeeds, so we never show a record that wasn't saved.
       try {
         await db.put(collection, record)
-        console.log(`[DataContext] ${collection} saved (${getDataSource()}):`, record.id)
       } catch (e) {
         console.error(`[DataContext] failed to save ${collection}:`, e)
         toast?.('Could not save — it was not created. Please retry.', 'error')

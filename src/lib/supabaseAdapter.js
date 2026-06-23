@@ -69,26 +69,8 @@ const supabaseAdapter = {
   },
 
   async put(collection, record) {
-    const row = toRow(record)
-    if (collection === 'tasks') {
-      try {
-        const { data: s } = await supabase.auth.getSession()
-        console.log('[Current Auth User]', s?.session?.user ? { id: s.session.user.id, email: s.session.user.email } : null)
-      } catch (e) {
-        console.log('[Current Auth User] (could not read session)', e?.message)
-      }
-      console.log('[Task Save Payload]', row)
-    }
-    try {
-      const data = await upsertWithRetry(collection, row)
-      if (collection === 'tasks') console.log('[Task Save Result]', data)
-      return fromRow(data)
-    } catch (e) {
-      if (collection === 'tasks') {
-        console.error('[Task Save Error]', { code: e?.code, message: e?.message, details: e?.details, hint: e?.hint })
-      }
-      throw e
-    }
+    const data = await upsertWithRetry(collection, toRow(record))
+    return fromRow(data)
   },
 
   async remove(collection, id) {
