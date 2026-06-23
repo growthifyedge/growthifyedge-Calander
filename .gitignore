@@ -32,3 +32,6 @@ Thumbs.db
 .vite
 *.tsbuildinfo
 .vercel
+
+.vercel
+.env*
