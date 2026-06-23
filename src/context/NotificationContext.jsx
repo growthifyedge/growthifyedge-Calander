@@ -74,17 +74,23 @@ export function NotificationProvider({ children }) {
 
   // Core: construct a browser Notification with MINIMAL options (no SVG icon —
   // SVG icons can silently prevent display in Chrome). Returns {ok, reason}.
-  const notify = useCallback((title, body, tag) => {
+  const notify = useCallback(async (title, body, tag) => {
     if (!supported) return { ok: false, reason: 'Notifications not supported in this browser' }
     const perm = Notification.permission
     if (perm === 'denied') return { ok: false, reason: 'blocked' }
     if (perm !== 'granted') return { ok: false, reason: 'permission not granted' }
+    const options = { body, icon: '/icons/icon-192.png', badge: '/icons/icon-192.png', ...(tag ? { tag } : {}) }
     try {
-      const opts = tag ? { body, tag } : { body }
-      const n = new Notification(title, opts)
-      return { ok: Boolean(n), reason: undefined, notification: n }
+      // Android Chrome forbids `new Notification(...)` — use the SW registration.
+      if ('serviceWorker' in navigator) {
+        const registration = await navigator.serviceWorker.ready
+        await registration.showNotification(title, options)
+        return { ok: true }
+      }
+      new Notification(title, options)
+      return { ok: true }
     } catch (e) {
-      return { ok: false, reason: e?.message || 'Notification constructor threw' }
+      return { ok: false, reason: e?.message || 'Notification failed' }
     }
   }, [])
 
@@ -109,8 +115,8 @@ export function NotificationProvider({ children }) {
       toast('Notification permission was not granted', 'error')
       return { ok: false, reason: 'not granted' }
     }
-    const res = notify('GrowthifyEdge OS Reminder', 'Test notification from GrowthifyEdge OS')
-    log('new Notification() result', res)
+    const res = await notify('Test notification', 'Reminder notifications are working on this device.')
+    log('showNotification result', res)
     if (res.ok) toast('Test notification sent')
     else toast(`Notification failed: ${res.reason}`, 'error')
     return res
@@ -134,11 +140,11 @@ export function NotificationProvider({ children }) {
   useEffect(() => {
     if (!supported) return
 
-    const fireOnce = (key, title, body) => {
+    const fireOnce = async (key, title, body) => {
       if (firedRef.current.has(key)) return
       firedRef.current.add(key)
       persistFired()
-      const res = notify(title, body, key)
+      const res = await notify(title, body, key)
       log('fired', { key, title, browserOk: res.ok, reason: res.reason })
       // Always surface an in-app toast — this is the fallback if the browser
       // notification fails for any reason, and confirms the scheduler triggered.

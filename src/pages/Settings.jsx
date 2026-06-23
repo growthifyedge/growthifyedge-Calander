@@ -57,52 +57,17 @@ export default function Settings() {
     setTimeout(() => window.location.reload(), 600)
   }
 
-  // Emergency direct test — bypasses NotificationContext entirely and calls the raw
-  // browser Notification API. Console logs intentionally left ON in production for
-  // debugging. (Project toast API is toast(message, type) — no .success/.error.)
+  // Foreground "Send test". On Android Chrome `new Notification(...)` throws
+  // ("Illegal constructor — use ServiceWorkerRegistration.showNotification()"),
+  // so we show via the service worker registration when available and only fall
+  // back to new Notification for browsers without a service worker.
+  // Console logs intentionally left ON in production for debugging.
+  // (Project toast API is toast(message, type) — no .success/.error.)
   async function sendDirectTestNotification() {
     try {
       console.log('[GE Notification Debug] Button clicked')
       console.log('[GE Notification Debug] Notification available:', 'Notification' in window)
-      console.log('[GE Notification Debug] Permission:', 'Notification' in window ? Notification.permission : 'n/a')
-      console.log('[GE Notification Debug] Secure context:', window.isSecureContext)
-
-      if (!('Notification' in window)) {
-        toast('This browser does not support notifications', 'error')
-        return
-      }
-
-      let permission = Notification.permission
-
-      if (permission === 'default') {
-        permission = await Notification.requestPermission()
-      }
-
-      if (permission !== 'granted') {
-        toast('Notifications are blocked or not allowed', 'error')
-        return
-      }
-
-      const notification = new Notification('GrowthifyEdge OS Reminder', {
-        body: 'Test notification from GrowthifyEdge OS',
-      })
-
-      console.log('[GE Notification Debug] Notification created:', notification)
-
-      toast('Test notification sent', 'success')
-    } catch (error) {
-      console.error('[GE Notification Debug] Notification failed:', error)
-      toast('Notification failed: ' + error.message, 'error')
-    }
-  }
-
-  // Self-contained test notification — does NOT depend on NotificationContext.
-  // Mirrors a plain `new Notification(...)` exactly (no icon/badge/etc).
-  // Note: our toast API is toast(message, type) — not toast.error()/.success().
-  async function sendDirectTestNotification() {
-    try {
-      console.log('[GE Notification Debug] Button clicked')
-      console.log('[GE Notification Debug] Notification available:', 'Notification' in window)
+      console.log('[GE Notification Debug] serviceWorker available:', 'serviceWorker' in navigator)
       console.log('[GE Notification Debug] Permission:', 'Notification' in window ? Notification.permission : 'n/a')
       console.log('[GE Notification Debug] Secure context:', window.isSecureContext)
 
@@ -116,17 +81,28 @@ export default function Settings() {
         permission = await Notification.requestPermission()
         console.log('[GE Notification Debug] Permission after request:', permission)
       }
-
       if (permission !== 'granted') {
         toast('Notifications are blocked or not allowed', 'error')
         return
       }
 
-      const notification = new Notification('GrowthifyEdge OS Reminder', {
-        body: 'Test notification from GrowthifyEdge OS',
-      })
+      const title = 'Test notification'
+      const options = {
+        body: 'Reminder notifications are working on this device.',
+        icon: '/icons/icon-192.png',
+        badge: '/icons/icon-192.png',
+      }
 
-      console.log('[GE Notification Debug] Notification created:', notification)
+      if ('serviceWorker' in navigator) {
+        const registration = await navigator.serviceWorker.ready
+        await registration.showNotification(title, options)
+        console.log('[GE Notification Debug] Shown via serviceWorker.showNotification')
+      } else {
+        // Fallback for browsers without service workers.
+        new Notification(title, options)
+        console.log('[GE Notification Debug] Shown via new Notification fallback')
+      }
+
       toast('Test notification sent', 'success')
     } catch (error) {
       console.error('[GE Notification Debug] Notification failed:', error)
