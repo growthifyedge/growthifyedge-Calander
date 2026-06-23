@@ -1,6 +1,6 @@
 // Vercel serverless function (also runs on a cron) — sends due task reminders
 // via Web Push. Finds tasks whose reminder_time has passed and reminder_sent is
-// false, pushes to the matching device subscriptions, prunes expired ones, then
+// false, pushes to ALL active device subscriptions, prunes expired ones, then
 // marks the tasks as sent. Server-only secrets (service role + VAPID private).
 import { createClient } from '@supabase/supabase-js'
 import webpush from 'web-push'
@@ -39,7 +39,7 @@ export default async function handler(req, res) {
       .limit(25)
     if (tasksErr) throw tasksErr
 
-    // 2. Load subscriptions once (for per-user match + fallback).
+    // 2. Load all active subscriptions once (every due reminder goes to all).
     const { data: allSubs, error: subsErr } = await supabase
       .from('push_subscriptions')
       .select('id, endpoint, subscription, user_id')
@@ -47,11 +47,9 @@ export default async function handler(req, res) {
     const subscriptions = allSubs || []
 
     for (const task of tasks || []) {
-      // Prefer subscriptions matching the task's user; fall back to all because
-      // this app may not have strict user mapping yet.
-      let targets = task.user_id ? subscriptions.filter((s) => s.user_id === task.user_id) : []
-      if (targets.length === 0) targets = subscriptions
-      targets = targets.filter((s) => !expired.has(s.endpoint))
+      // Multi-device: send every due reminder to ALL active subscriptions
+      // (no user_id filtering yet — that comes in a later step).
+      const targets = subscriptions.filter((s) => !expired.has(s.endpoint))
 
       const payload = JSON.stringify({
         title: 'Reminder',
