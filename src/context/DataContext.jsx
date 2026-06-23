@@ -4,7 +4,7 @@ import { db, getDataSource } from '../lib/db'
 import { useAuth } from './AuthContext'
 import { useToast } from './ToastContext'
 import { buildSeed, defaultSettings } from '../lib/seed'
-import { uid, nowISO, toDate } from '../lib/utils'
+import { uid, nowISO, toDate, reminderFireTime } from '../lib/utils'
 
 const DataContext = createContext(null)
 export const useData = () => useContext(DataContext)
@@ -13,6 +13,21 @@ const EMPTY = { clients: [], projects: [], tasks: [], files: [], meetings: [], a
 
 const LABEL_KEY = { clients: 'company', projects: 'name', tasks: 'title', meetings: 'title', approvals: 'title', files: 'name' }
 const ACTIVITY_TYPE = { clients: 'client', projects: 'project', tasks: 'task', meetings: 'meeting', approvals: 'approval', files: 'file' }
+
+// Step 5B: keep tasks.reminder_time (absolute) in sync with the app's reminder
+// fields (reminder + reminderCustomAt + dueDate via reminderFireTime). Whenever
+// the fire time changes vs the previous record, reset the delivery flags so the
+// cron will pick it up again. snake_case mapping to Supabase columns happens in
+// supabaseAdapter (reminderTime → reminder_time, etc.).
+const withTaskReminder = (next, prev = null) => {
+  const reminderTime = reminderFireTime(next)?.toISOString() ?? null
+  const changed = reminderTime !== (prev?.reminderTime ?? null)
+  return {
+    ...next,
+    reminderTime,
+    ...(changed ? { reminderSent: false, reminderSentAt: null } : {}),
+  }
+}
 
 export function DataProvider({ children }) {
   const { userId, status: authStatus } = useAuth()
@@ -78,7 +93,12 @@ export function DataProvider({ children }) {
   // ── Generic per-record CRUD ─────────────────────────────────────────────────
   const create = useCallback(
     async (collection, payload) => {
-      const record = { id: uid(collection.slice(0, 2)), user_id: userId, createdAt: nowISO(), ...payload }
+      let record = { id: uid(collection.slice(0, 2)), user_id: userId, createdAt: nowISO(), ...payload }
+      if (collection === 'tasks') {
+        record.reminderTime = reminderFireTime(record)?.toISOString() ?? null
+        record.reminderSent = false
+        record.reminderSentAt = null
+      }
       setData((d) => ({ ...d, [collection]: [record, ...d[collection]] }))
       await db.put(collection, record).catch((e) => console.error(e))
       logActivity(ACTIVITY_TYPE[collection], 'created', record[LABEL_KEY[collection]] || 'item')
@@ -91,7 +111,12 @@ export function DataProvider({ children }) {
     async (collection, id, patch, opts = {}) => {
       let updated = null
       setData((d) => {
-        const next = d[collection].map((r) => (r.id === id ? (updated = { ...r, ...patch, updatedAt: nowISO() }) : r))
+        const next = d[collection].map((r) => {
+          if (r.id !== id) return r
+          updated = { ...r, ...patch, updatedAt: nowISO() }
+          if (collection === 'tasks') updated = withTaskReminder(updated, r)
+          return updated
+        })
         return { ...d, [collection]: next }
       })
       if (updated) await db.put(collection, updated).catch((e) => console.error(e))
@@ -120,7 +145,10 @@ export function DataProvider({ children }) {
       const idSet = new Set(ids)
       const changed = data[collection]
         .filter((r) => idSet.has(r.id))
-        .map((r) => ({ ...r, ...(typeof patchOrFn === 'function' ? patchOrFn(r) : patchOrFn), updatedAt: nowISO() }))
+        .map((r) => {
+          const next = { ...r, ...(typeof patchOrFn === 'function' ? patchOrFn(r) : patchOrFn), updatedAt: nowISO() }
+          return collection === 'tasks' ? withTaskReminder(next, r) : next
+        })
       const byId = Object.fromEntries(changed.map((r) => [r.id, r]))
       setData((d) => ({ ...d, [collection]: d[collection].map((r) => byId[r.id] || r) }))
       for (const r of changed) await db.put(collection, r).catch((e) => console.error(e))
