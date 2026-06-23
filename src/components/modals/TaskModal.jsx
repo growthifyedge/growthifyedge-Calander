@@ -99,6 +99,7 @@ export default function TaskModal({ open, onClose, record, initial }) {
       // Note: file attachments live in the `files` table (linked by taskId),
       // not on the task row — the tasks table has no `attachments` column.
       task = await create('tasks', payload)
+      if (!task) return // save failed — error already shown; keep modal open
     }
     for (const { file } of pending) {
       await addFile(

@@ -46,6 +46,7 @@ export default function ApprovalModal({ open, onClose, record, initial }) {
     } else {
       rec = await create('approvals', { ...base, fileIds: [], history: [{ status: form.status, note: 'Created', at: nowISO() }] })
     }
+    if (!rec) return // save failed — error already shown; keep modal open
     for (const { file } of pending) {
       await addFile(
         {

@@ -34,6 +34,7 @@ export default function MeetingCard({ meeting, showClient = true, defaultOpen = 
       dueDate: null,
       notes: '',
     })
+    if (!task) return // save failed — error already shown
     await update('meetings', meeting.id, {
       actionItems: items.map((i) => (i.id === item.id ? { ...i, taskId: task.id } : i)),
     })

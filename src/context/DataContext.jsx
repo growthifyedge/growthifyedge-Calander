@@ -99,14 +99,17 @@ export function DataProvider({ children }) {
         record.reminderSent = false
         record.reminderSentAt = null
       }
-      setData((d) => ({ ...d, [collection]: [record, ...d[collection]] }))
+      // Persist FIRST — only reflect the new record in the UI once the backend
+      // save actually succeeds, so we never show a record that wasn't saved.
       try {
         await db.put(collection, record)
         console.log(`[DataContext] ${collection} saved (${getDataSource()}):`, record.id)
       } catch (e) {
         console.error(`[DataContext] failed to save ${collection}:`, e)
-        toast?.('Could not save — please check your connection and retry', 'error')
+        toast?.('Could not save — it was not created. Please retry.', 'error')
+        return null
       }
+      setData((d) => ({ ...d, [collection]: [record, ...d[collection]] }))
       logActivity(ACTIVITY_TYPE[collection], 'created', record[LABEL_KEY[collection]] || 'item')
       return record
     },

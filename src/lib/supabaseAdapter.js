@@ -22,7 +22,13 @@ const upsertWithRetry = async (collection, payload) => {
     const query = supabase.from(collection).upsert(body)
     const { data, error } = Array.isArray(body) ? await query.select() : await query.select().single()
     if (!error) return data
-    const missingCol = /Could not find the '([^']+)' column/.exec(error.message || '')?.[1]
+    // Detect "unknown column" across both PostgREST (PGRST204) and native
+    // Postgres (42703) error message formats.
+    const msg = error.message || ''
+    const missingCol =
+      /Could not find the '([^']+)' column/.exec(msg)?.[1] ||
+      /column "?([a-z0-9_]+)"? of relation/i.exec(msg)?.[1] ||
+      /column (?:[a-z0-9_]+\.)?"?([a-z0-9_]+)"? does not exist/i.exec(msg)?.[1]
     if (missingCol) {
       console.warn(`[supabaseAdapter] '${collection}': unknown column '${missingCol}' — dropping it and retrying`)
       body = Array.isArray(body)
@@ -63,8 +69,26 @@ const supabaseAdapter = {
   },
 
   async put(collection, record) {
-    const data = await upsertWithRetry(collection, toRow(record))
-    return fromRow(data)
+    const row = toRow(record)
+    if (collection === 'tasks') {
+      try {
+        const { data: s } = await supabase.auth.getSession()
+        console.log('[Current Auth User]', s?.session?.user ? { id: s.session.user.id, email: s.session.user.email } : null)
+      } catch (e) {
+        console.log('[Current Auth User] (could not read session)', e?.message)
+      }
+      console.log('[Task Save Payload]', row)
+    }
+    try {
+      const data = await upsertWithRetry(collection, row)
+      if (collection === 'tasks') console.log('[Task Save Result]', data)
+      return fromRow(data)
+    } catch (e) {
+      if (collection === 'tasks') {
+        console.error('[Task Save Error]', { code: e?.code, message: e?.message, details: e?.details, hint: e?.hint })
+      }
+      throw e
+    }
   },
 
   async remove(collection, id) {
