@@ -100,11 +100,17 @@ export function DataProvider({ children }) {
         record.reminderSentAt = null
       }
       setData((d) => ({ ...d, [collection]: [record, ...d[collection]] }))
-      await db.put(collection, record).catch((e) => console.error(e))
+      try {
+        await db.put(collection, record)
+        console.log(`[DataContext] ${collection} saved (${getDataSource()}):`, record.id)
+      } catch (e) {
+        console.error(`[DataContext] failed to save ${collection}:`, e)
+        toast?.('Could not save — please check your connection and retry', 'error')
+      }
       logActivity(ACTIVITY_TYPE[collection], 'created', record[LABEL_KEY[collection]] || 'item')
       return record
     },
-    [userId, logActivity],
+    [userId, logActivity, toast],
   )
 
   const update = useCallback(
@@ -119,11 +125,18 @@ export function DataProvider({ children }) {
         })
         return { ...d, [collection]: next }
       })
-      if (updated) await db.put(collection, updated).catch((e) => console.error(e))
+      if (updated) {
+        try {
+          await db.put(collection, updated)
+        } catch (e) {
+          console.error(`[DataContext] failed to update ${collection}:`, e)
+          toast?.('Could not save changes — please retry', 'error')
+        }
+      }
       if (opts.activity) logActivity(ACTIVITY_TYPE[collection], opts.activity, updated?.[LABEL_KEY[collection]] || 'item')
       return updated
     },
-    [logActivity],
+    [logActivity, toast],
   )
 
   const remove = useCallback(
@@ -226,7 +239,6 @@ export function DataProvider({ children }) {
         reminder: task.reminder === 'custom' ? 'none' : task.reminder || 'none',
         reminderCustomAt: null,
         completedAt: null,
-        attachments: [],
       })
       toast?.('Next occurrence scheduled', 'info')
     },

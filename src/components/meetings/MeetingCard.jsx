@@ -33,7 +33,6 @@ export default function MeetingCard({ meeting, showClient = true, defaultOpen = 
       status: 'pending',
       dueDate: null,
       notes: '',
-      attachments: [],
     })
     await update('meetings', meeting.id, {
       actionItems: items.map((i) => (i.id === item.id ? { ...i, taskId: task.id } : i)),

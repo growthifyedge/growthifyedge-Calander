@@ -12,6 +12,36 @@ const fromRow = (row) => Object.fromEntries(Object.entries(row).map(([k, v]) => 
 
 const uid = async () => (await supabase.auth.getUser()).data.user?.id ?? null
 
+// Self-healing upsert: if PostgREST reports a column that doesn't exist in the
+// table (e.g. a stray field like `attachments`, or a column a migration hasn't
+// added yet), drop that column and retry instead of failing the whole write.
+// Real errors (RLS, network, etc.) are thrown — never silently swallowed.
+const upsertWithRetry = async (collection, payload) => {
+  let body = payload
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const query = supabase.from(collection).upsert(body)
+    const { data, error } = Array.isArray(body) ? await query.select() : await query.select().single()
+    if (!error) return data
+    const missingCol = /Could not find the '([^']+)' column/.exec(error.message || '')?.[1]
+    if (missingCol) {
+      console.warn(`[supabaseAdapter] '${collection}': unknown column '${missingCol}' — dropping it and retrying`)
+      body = Array.isArray(body)
+        ? body.map((r) => {
+            const { [missingCol]: _omit, ...rest } = r
+            return rest
+          })
+        : (() => {
+            const { [missingCol]: _omit, ...rest } = body
+            return rest
+          })()
+      continue
+    }
+    console.error(`[supabaseAdapter] upsert '${collection}' failed:`, error)
+    throw error
+  }
+  throw new Error(`[supabaseAdapter] upsert '${collection}' failed after stripping unknown columns`)
+}
+
 const supabaseAdapter = {
   kind: 'supabase',
 
@@ -28,14 +58,12 @@ const supabaseAdapter = {
 
   async setAll(collection, records) {
     if (!records.length) return records
-    const { error } = await supabase.from(collection).upsert(records.map(toRow))
-    if (error) throw error
+    await upsertWithRetry(collection, records.map(toRow))
     return records
   },
 
   async put(collection, record) {
-    const { data, error } = await supabase.from(collection).upsert(toRow(record)).select().single()
-    if (error) throw error
+    const data = await upsertWithRetry(collection, toRow(record))
     return fromRow(data)
   },
 

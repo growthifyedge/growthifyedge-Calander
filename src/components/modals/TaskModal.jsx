@@ -96,7 +96,8 @@ export default function TaskModal({ open, onClose, record, initial }) {
     let task = record
     if (isEdit) await update('tasks', record.id, payload)
     else {
-      payload.attachments = []
+      // Note: file attachments live in the `files` table (linked by taskId),
+      // not on the task row — the tasks table has no `attachments` column.
       task = await create('tasks', payload)
     }
     for (const { file } of pending) {
