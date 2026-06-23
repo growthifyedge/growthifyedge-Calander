@@ -29,3 +29,15 @@ ReactDOM.createRoot(document.getElementById('root')).render(
     </HashRouter>
   </React.StrictMode>,
 )
+
+// Register the custom service worker (built to /sw.js by vite-plugin-pwa).
+// Manual registration because the plugin uses injectRegister: false.
+// Guarded + non-fatal so a failure never breaks the app.
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker
+      .register('/sw.js')
+      .then((reg) => console.log('[SW] registered:', reg.scope))
+      .catch((err) => console.error('[SW] registration failed:', err))
+  })
+}

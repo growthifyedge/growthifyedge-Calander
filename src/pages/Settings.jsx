@@ -5,6 +5,7 @@ import { useData } from '../context/DataContext'
 import { useAuth } from '../context/AuthContext'
 import { useNotifications } from '../context/NotificationContext'
 import { useToast } from '../context/ToastContext'
+import { enablePushNotifications } from '../utils/pushNotifications'
 import PageHeader from '../components/PageHeader'
 import { Button, Card, Avatar } from '../components/ui'
 import { Field, Input, Switch } from '../components/ui/Form'
@@ -23,6 +24,8 @@ export default function Settings() {
   const [profile, setProfile] = useState(settings.profile || {})
   const [reset, setReset] = useState(null)
   const source = getDataSource()
+  // Local capability check — independent of NotificationContext.
+  const canNotify = typeof window !== 'undefined' && 'Notification' in window
 
   const saveProfile = async () => {
     await updateSettings({ profile })
@@ -52,6 +55,45 @@ export default function Settings() {
     setDataSource(src)
     toast('Switching data source…')
     setTimeout(() => window.location.reload(), 600)
+  }
+
+  // Emergency direct test — bypasses NotificationContext entirely and calls the raw
+  // browser Notification API. Console logs intentionally left ON in production for
+  // debugging. (Project toast API is toast(message, type) — no .success/.error.)
+  async function sendDirectTestNotification() {
+    try {
+      console.log('[GE Notification Debug] Button clicked')
+      console.log('[GE Notification Debug] Notification available:', 'Notification' in window)
+      console.log('[GE Notification Debug] Permission:', 'Notification' in window ? Notification.permission : 'n/a')
+      console.log('[GE Notification Debug] Secure context:', window.isSecureContext)
+
+      if (!('Notification' in window)) {
+        toast('This browser does not support notifications', 'error')
+        return
+      }
+
+      let permission = Notification.permission
+
+      if (permission === 'default') {
+        permission = await Notification.requestPermission()
+      }
+
+      if (permission !== 'granted') {
+        toast('Notifications are blocked or not allowed', 'error')
+        return
+      }
+
+      const notification = new Notification('GrowthifyEdge OS Reminder', {
+        body: 'Test notification from GrowthifyEdge OS',
+      })
+
+      console.log('[GE Notification Debug] Notification created:', notification)
+
+      toast('Test notification sent', 'success')
+    } catch (error) {
+      console.error('[GE Notification Debug] Notification failed:', error)
+      toast('Notification failed: ' + error.message, 'error')
+    }
   }
 
   // Self-contained test notification — does NOT depend on NotificationContext.
@@ -89,6 +131,17 @@ export default function Settings() {
     } catch (error) {
       console.error('[GE Notification Debug] Notification failed:', error)
       toast('Notification failed: ' + (error?.message || error), 'error')
+    }
+  }
+
+  // Step 3 (temporary): subscribe this device to Web Push. Not saved anywhere yet.
+  async function handleEnablePush() {
+    try {
+      const result = await enablePushNotifications()
+      console.log('[Push] enablePushNotifications result:', result)
+      alert('Reminder notifications enabled successfully.')
+    } catch (error) {
+      alert(error?.message || String(error))
     }
   }
 
@@ -140,7 +193,7 @@ export default function Settings() {
           <p className="mb-4 text-sm text-muted">
             Browser notifications for task reminders, due, and overdue alerts. Works while GrowthifyEdge OS is open in a tab — no apps or paid services needed.
           </p>
-          {!notif?.supported ? (
+          {!canNotify ? (
             <p className="flex items-center gap-2 rounded-xl bg-surface-2 px-3 py-2.5 text-sm text-muted">
               <BellOff className="h-4 w-4" /> This browser doesn't support notifications.
             </p>
@@ -207,6 +260,16 @@ export default function Settings() {
               </div>
             </div>
           )}
+
+          {/* Step 3 (temporary): subscribe this device to Web Push */}
+          <div className="mt-4 border-t border-border pt-4">
+            <Button variant="ghost" onClick={handleEnablePush}>
+              <Bell className="h-4 w-4" /> Enable Reminder Notifications
+            </Button>
+            <p className="mt-1.5 text-xs text-muted">
+              Web Push (beta) — subscribes this device so reminders can arrive even when the app is closed.
+            </p>
+          </div>
         </Card>
 
         {/* Profile */}
