@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { MessageSquarePlus, PencilLine, Wand2, Check, Bell, AlertTriangle, Tag, Eraser } from 'lucide-react'
+import { MessageSquarePlus, PencilLine, Wand2, Check, Bell, AlertTriangle, Tag, Eraser, Sparkles, RotateCcw } from 'lucide-react'
 import { useData } from '../context/DataContext'
 import { useToast } from '../context/ToastContext'
 import { useQuickAdd } from '../context/QuickAddContext'
@@ -76,6 +76,41 @@ const blankManualDraft = () => ({
   reminderCustomAt: '',
   source: 'Manual',
 })
+
+// Quick presets — pre-fill common fields only (client/source/task type/priority).
+// They never auto-save and never touch title/description.
+const PRESETS = [
+  { label: 'Festigo Video', client: 'Festigo Event Planner', source: 'Manual', taskType: 'video', priorityLevel: 'normal' },
+  { label: 'Festigo Caption', client: 'Festigo Event Planner', source: 'Manual', taskType: 'caption', priorityLevel: 'normal' },
+  { label: 'Festigo Picture Post', client: 'Festigo Event Planner', source: 'Manual', taskType: 'thumbnail', priorityLevel: 'normal' },
+  { label: 'Gain Shred Video', client: 'Gain Shred Gym Mobile Shop', source: 'Manual', taskType: 'video', priorityLevel: 'normal' },
+  { label: 'Gain Shred Caption', client: 'Gain Shred Gym Mobile Shop', source: 'Manual', taskType: 'caption', priorityLevel: 'normal' },
+  { label: 'Gain Shred Picture Post', client: 'Gain Shred Gym Mobile Shop', source: 'Manual', taskType: 'thumbnail', priorityLevel: 'normal' },
+  { label: 'iSolutions Task', client: 'iSolutions Pakistan', source: 'Manual', taskType: 'other', priorityLevel: 'normal' },
+  { label: 'iSolutions Follow-up', client: 'iSolutions Pakistan', source: 'Manual', taskType: 'other', priorityLevel: 'urgent' },
+]
+
+// Device-local "last used" settings (localStorage only — never synced to Supabase).
+const LAST_KEY = 'ge_qti_last'
+const loadLast = () => {
+  try {
+    return JSON.parse(localStorage.getItem(LAST_KEY) || 'null')
+  } catch {
+    return null
+  }
+}
+const saveLast = (clientValue, draft) =>
+  localStorage.setItem(
+    LAST_KEY,
+    JSON.stringify({
+      client: clientValue,
+      source: draft.source,
+      taskType: draft.taskType,
+      priorityLevel: draft.priorityLevel,
+      reminderMode: draft.reminderMode,
+    }),
+  )
+const clearLast = () => localStorage.removeItem(LAST_KEY)
 
 // Shared fields used by BOTH modes: priority, task type, reminder, tags preview.
 function CommonDraftFields({ draft, setDraft, resolved }) {
@@ -170,19 +205,86 @@ export default function QuickTaskIntake() {
 
   const setD = (k) => (e) => setDraft((d) => ({ ...d, [k]: e.target.value }))
 
+  // Resolve a client name → existing client id, or a "new:" value the save path creates.
+  const clientValueForName = (name) => {
+    const existing = clients.find((c) => (c.company || '').trim().toLowerCase() === (name || '').trim().toLowerCase())
+    return existing ? existing.id : `new:${name}`
+  }
+  // Keep a stored client value valid against the current client list.
+  const normalizeClientValue = (val) => {
+    if (!val) return ''
+    if (val.startsWith('new:')) return clientValueForName(val.slice(4))
+    return clients.some((c) => c.id === val) ? val : ''
+  }
+  // Build manual draft + client from device-local "last used" settings.
+  const buildManualState = () => {
+    const last = loadLast()
+    return {
+      clientSel: normalizeClientValue(last?.client),
+      draft: {
+        title: '',
+        description: '',
+        priorityLevel: last?.priorityLevel || 'normal',
+        taskType: last?.taskType || 'other',
+        reminderMode: last?.reminderMode && last.reminderMode !== 'custom' ? last.reminderMode : 'none',
+        reminderCustomAt: '',
+        source: last?.source || 'Manual',
+      },
+    }
+  }
+
   const switchMode = (m) => {
     setMode(m)
     setRaw('')
-    setClientSel('')
     setConfirmOpen(false)
-    setDraft(m === 'manual' ? blankManualDraft() : null)
+    if (m === 'manual') {
+      const s = buildManualState()
+      setClientSel(s.clientSel)
+      setDraft(s.draft)
+    } else {
+      setClientSel('')
+      setDraft(null)
+    }
   }
 
   const reset = () => {
     setRaw('')
-    setClientSel('')
     setConfirmOpen(false)
-    setDraft(mode === 'manual' ? blankManualDraft() : null)
+    if (mode === 'manual') {
+      const s = buildManualState()
+      setClientSel(s.clientSel)
+      setDraft(s.draft)
+    } else {
+      setClientSel('')
+      setDraft(null)
+    }
+  }
+
+  // Quick preset → Manual mode + fill the 4 preset fields (overrides last-used for
+  // this draft). Keeps title/description empty. Never auto-saves.
+  const applyPreset = (preset) => {
+    setMode('manual')
+    setRaw('')
+    setConfirmOpen(false)
+    setClientSel(clientValueForName(preset.client))
+    setDraft({
+      title: '',
+      description: '',
+      source: preset.source,
+      taskType: preset.taskType,
+      priorityLevel: preset.priorityLevel,
+      reminderMode: 'none',
+      reminderCustomAt: '',
+    })
+    toast(`Preset applied: ${preset.label}`)
+  }
+
+  // Clear device-local last-used settings and return to true defaults.
+  const resetDefaults = () => {
+    clearLast()
+    setClientSel('')
+    setDraft(blankManualDraft())
+    toast('Defaults reset')
   }
 
   const createDraft = () => {
@@ -251,6 +353,9 @@ export default function QuickTaskIntake() {
       const clientId = await resolveClientId(true)
       const task = await create('tasks', buildPayload(clientId, when))
       if (task) {
+        // Only Manual mode saves update the device-local "last used" defaults, so
+        // a pasted WhatsApp task never changes the manual workflow defaults.
+        if (mode === 'manual') saveLast(clientSel, draft)
         toast('Task saved')
         reset()
       }
@@ -334,6 +439,25 @@ export default function QuickTaskIntake() {
         ))}
       </div>
 
+      {/* Quick presets — one tap to pre-fill a manual draft (still editable, never auto-saves) */}
+      <Card className="mb-5 p-4">
+        <div className="mb-2 flex items-center gap-2 text-xs font-bold uppercase tracking-wide text-muted">
+          <Sparkles className="h-3.5 w-3.5" /> Quick presets
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {PRESETS.map((p) => (
+            <button
+              key={p.label}
+              type="button"
+              onClick={() => applyPreset(p)}
+              className="rounded-xl border border-border bg-surface px-3 py-1.5 text-xs font-semibold text-fg transition hover:border-accent-400 hover:text-accent-600"
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
+      </Card>
+
       {mode === 'paste' ? (
         <div className="space-y-5">
           {/* Step 1 — paste + client */}
@@ -399,9 +523,19 @@ export default function QuickTaskIntake() {
         // ── Manual Quick Task ──────────────────────────────────────────────
         draft && (
           <Card className="p-5">
-            <h2 className="mb-4 flex items-center gap-2 text-sm font-bold uppercase tracking-wide text-muted">
-              <PencilLine className="h-4 w-4" /> Manual Quick Task
-            </h2>
+            <div className="mb-4 flex items-center justify-between">
+              <h2 className="flex items-center gap-2 text-sm font-bold uppercase tracking-wide text-muted">
+                <PencilLine className="h-4 w-4" /> Manual Quick Task
+              </h2>
+              <button
+                type="button"
+                onClick={resetDefaults}
+                className="inline-flex items-center gap-1 text-xs font-semibold text-muted transition hover:text-fg"
+                title="Clear last-used settings and return to defaults"
+              >
+                <RotateCcw className="h-3.5 w-3.5" /> Reset defaults
+              </button>
+            </div>
             <div className="space-y-4">
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
                 <Field label="Client">{clientSelect}</Field>
