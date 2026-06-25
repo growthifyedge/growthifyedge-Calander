@@ -3,6 +3,7 @@ import { motion } from 'framer-motion'
 import {
   LayoutDashboard,
   CheckSquare,
+  MessageSquarePlus,
   CalendarDays,
   Users,
   FolderKanban,
@@ -24,6 +25,7 @@ const SECTIONS = [
     items: [
       { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true },
       { to: '/tasks', label: 'Tasks', icon: CheckSquare },
+      { to: '/capture', label: 'WhatsApp Capture', icon: MessageSquarePlus },
       { to: '/calendar', label: 'Calendar', icon: CalendarDays },
     ],
   },

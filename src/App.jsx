@@ -17,6 +17,7 @@ import Approvals from './pages/Approvals'
 import Meetings from './pages/Meetings'
 import Reports from './pages/Reports'
 import Settings from './pages/Settings'
+import QuickCapture from './pages/QuickCapture'
 
 function AppShell() {
   const { loading } = useData()
@@ -26,6 +27,7 @@ function AppShell() {
       <Route element={<Layout />}>
         <Route index element={<Dashboard />} />
         <Route path="tasks" element={<Tasks />} />
+        <Route path="capture" element={<QuickCapture />} />
         <Route path="calendar" element={<Calendar />} />
         <Route path="clients" element={<Clients />} />
         <Route path="clients/:id" element={<ClientDetail />} />
