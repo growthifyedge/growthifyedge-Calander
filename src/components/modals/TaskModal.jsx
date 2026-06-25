@@ -1,12 +1,15 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Paperclip, X, Tag, Repeat, Link2, Plus, Bell } from 'lucide-react'
+import { Paperclip, X, Tag, Repeat, Link2, Plus, Bell, Download } from 'lucide-react'
 import { Modal } from '../ui/Modal'
 import { Button } from '../ui'
 import { Field, Input, Textarea, Select } from '../ui/Form'
+import FileThumb from '../files/FileThumb'
+import FilePreviewModal from '../files/FilePreviewModal'
 import { useData } from '../../context/DataContext'
 import { useToast } from '../../context/ToastContext'
 import { TASK_STATUSES, TASK_PRIORITIES, TASK_CATEGORIES, RECURRENCE_OPTIONS, REMINDER_OPTIONS } from '../../lib/constants'
-import { toDateTimeInput, toDateInput, fileKind, fmtBytes, uid, reminderFireTime } from '../../lib/utils'
+import { toDateTimeInput, toDateInput, fileKind, fmtBytes, uid, reminderFireTime, downloadBlob } from '../../lib/utils'
+import { db } from '../../lib/db'
 
 const blank = (initial = {}) => ({
   title: '',
@@ -29,13 +32,27 @@ const blank = (initial = {}) => ({
 })
 
 export default function TaskModal({ open, onClose, record, initial }) {
-  const { clients, projects, tasks, files, taskById, create, update, addFile, removeFile } = useData()
+  const { clients, projects, tasks, files, taskById, create, update, addFile, removeFile, getFileUrl } = useData()
   const { toast } = useToast()
   const [form, setForm] = useState(blank())
   const [pending, setPending] = useState([])
   const [tagInput, setTagInput] = useState('')
   const [depPick, setDepPick] = useState('')
+  const [previewFile, setPreviewFile] = useState(null)
   const isEdit = Boolean(record)
+
+  // Download a linked attachment (object URL locally, signed URL on Supabase).
+  const downloadAttachment = async (f) => {
+    try {
+      const blob = await db.getBlob(f.storagePath || f.id)
+      if (blob) return downloadBlob(blob, f.name)
+      const url = await getFileUrl(f)
+      if (url) window.open(url, '_blank')
+      else toast('Could not open this file', 'error')
+    } catch {
+      toast('Could not open this file', 'error')
+    }
+  }
 
   useEffect(() => {
     if (!open) return
@@ -275,14 +292,31 @@ export default function TaskModal({ open, onClose, record, initial }) {
         <div>
           <span className="label">Attachments</span>
           <div className="space-y-2">
-            {existingAttachments.map((f) => (
-              <div key={f.id} className="flex items-center gap-2 rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm">
-                <Paperclip className="h-4 w-4 text-muted" />
-                <span className="flex-1 truncate text-fg">{f.name}</span>
-                <span className="text-xs text-muted">{fmtBytes(f.size)}</span>
-                <button onClick={() => removeFile(f.id)} className="text-muted hover:text-red-500"><X className="h-4 w-4" /></button>
-              </div>
-            ))}
+            {existingAttachments.map((f) => {
+              const kind = f.kind || fileKind(f.mime, f.name)
+              return (
+                <div key={f.id} className="flex items-center gap-3 rounded-lg border border-border bg-surface-2 p-2 text-sm">
+                  <button
+                    type="button"
+                    onClick={() => setPreviewFile(f)}
+                    className="h-11 w-11 shrink-0 overflow-hidden rounded-lg"
+                    title="Preview"
+                  >
+                    <FileThumb file={f} rounded="rounded-lg" />
+                  </button>
+                  <button type="button" onClick={() => setPreviewFile(f)} className="min-w-0 flex-1 text-left">
+                    <div className="truncate font-medium text-fg">{f.name}</div>
+                    <div className="text-xs text-muted">{kind} · {fmtBytes(f.size)}</div>
+                  </button>
+                  <button onClick={() => downloadAttachment(f)} className="shrink-0 rounded-lg p-1.5 text-muted hover:bg-surface hover:text-fg" title="Download">
+                    <Download className="h-4 w-4" />
+                  </button>
+                  <button onClick={() => removeFile(f.id)} className="shrink-0 rounded-lg p-1.5 text-muted hover:text-red-500" title="Remove">
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
+              )
+            })}
             {pending.map(({ tmpId, file }) => (
               <div key={tmpId} className="flex items-center gap-2 rounded-lg border border-dashed border-accent-400 bg-accent-50/50 px-3 py-2 text-sm dark:bg-accent-500/10">
                 <Paperclip className="h-4 w-4 text-accent-500" />
@@ -299,6 +333,8 @@ export default function TaskModal({ open, onClose, record, initial }) {
           </div>
         </div>
       </div>
+
+      <FilePreviewModal file={previewFile} open={Boolean(previewFile)} onClose={() => setPreviewFile(null)} />
     </Modal>
   )
 }
