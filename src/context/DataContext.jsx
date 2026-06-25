@@ -80,6 +80,49 @@ export function DataProvider({ children }) {
     }
   }, [authStatus, userId, isLocal]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── Cross-session refresh (no realtime channel) ─────────────────────────────
+  // Data is loaded once at login. A change made in ANOTHER session/device/tab
+  // — e.g. an agent marking a task Done at /#/agent — is saved to the backend
+  // but won't appear in this already-open tab until the data is re-pulled.
+  // Re-pull SILENTLY (never toggles `loading`, so no loader flash) when this tab
+  // regains focus/visibility, plus a light interval while visible. Persisted
+  // writes are the source of truth, so re-pulling can't lose anything saved.
+  const refresh = useCallback(async () => {
+    if (authStatus !== 'authed') return
+    try {
+      await db.ready()
+      const loaded = {}
+      for (const c of Object.keys(EMPTY)) loaded[c] = await db.getAll(c)
+      const s = await db.getSettings()
+      setData(() => ({ ...EMPTY, ...loaded }))
+      if (s) setSettings((prev) => ({ ...prev, ...s, profile: { ...prev.profile, ...(s.profile || {}) } }))
+    } catch (e) {
+      console.error('[DataContext] background refresh failed', e)
+    }
+  }, [authStatus])
+
+  useEffect(() => {
+    if (authStatus !== 'authed') return
+    let last = Date.now()
+    const maybeRefresh = (force = false) => {
+      if (document.visibilityState === 'hidden') return
+      const now = Date.now()
+      if (!force && now - last < 4000) return // throttle focus bursts
+      last = now
+      refresh()
+    }
+    const onFocus = () => maybeRefresh()
+    const onVisible = () => maybeRefresh()
+    window.addEventListener('focus', onFocus)
+    document.addEventListener('visibilitychange', onVisible)
+    const interval = setInterval(() => maybeRefresh(true), 60000) // backstop while visible
+    return () => {
+      window.removeEventListener('focus', onFocus)
+      document.removeEventListener('visibilitychange', onVisible)
+      clearInterval(interval)
+    }
+  }, [authStatus, refresh])
+
   // ── Activity log ────────────────────────────────────────────────────────────
   const logActivity = useCallback(
     (type, action, entity) => {
@@ -371,6 +414,7 @@ export function DataProvider({ children }) {
     create,
     update,
     remove,
+    refresh,
     bulkUpdate,
     bulkRemove,
     setTaskStatus,
