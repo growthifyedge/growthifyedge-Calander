@@ -1,7 +1,8 @@
 import { useMemo, useState } from 'react'
-import { ListChecks, CalendarClock, Lock, ShieldCheck } from 'lucide-react'
+import { ListChecks, CalendarClock, Lock, ShieldCheck, Loader2 } from 'lucide-react'
 import { useData } from '../context/DataContext'
 import { useToast } from '../context/ToastContext'
+import { db } from '../lib/db'
 import { Card, EmptyState } from '../components/ui'
 import { Select } from '../components/ui/Form'
 import { TaskStatusBadge, PriorityBadge, ReminderChip } from '../components/ui/Badge'
@@ -15,6 +16,7 @@ const AGENT_STATUSES = [
   { value: 'in_progress', label: 'In Progress' },
   { value: 'done', label: 'Done' },
 ]
+const STATUS_LABEL = Object.fromEntries(AGENT_STATUSES.map((s) => [s.value, s.label]))
 
 const SOURCE_LABELS = { manual: 'Manual', whatsapp: 'WhatsApp', call: 'Call', meeting: 'Meeting', 'self-planned': 'Self Planned' }
 const TYPE_LABELS = { video: 'Video', thumbnail: 'Thumbnail / Picture Post', caption: 'Caption' }
@@ -34,12 +36,13 @@ const tagLabel = (tags, map) => {
 }
 
 export default function AgentDashboard() {
-  const { tasks, clients, files, clientById, setTaskStatus, update, isBlocked } = useData()
+  const { tasks, clients, files, clientById, setTaskStatus, update, isBlocked, refresh } = useData()
   const { toast } = useToast()
   const [filter, setFilter] = useState('active')
   const [clientId, setClientId] = useState('')
   const [previewFile, setPreviewFile] = useState(null)
   const [noteDrafts, setNoteDrafts] = useState({})
+  const [saving, setSaving] = useState({}) // { [taskId]: targetStatus } while a save is in flight
 
   const filtered = useMemo(() => {
     const list = tasks.filter((t) => {
@@ -64,16 +67,45 @@ export default function AgentDashboard() {
     return [...list].sort((a, b) => new Date(a.dueDate || '2999') - new Date(b.dueDate || '2999'))
   }, [tasks, filter, clientId])
 
-  // Update status only — reuses the existing setTaskStatus (handles completedAt,
-  // recurrence, dependency-blocking). No other task fields are editable here.
+  // Update status only — reuses the existing setTaskStatus (handles completedAt &
+  // recurrence). No other task fields are editable here. Critically, we VERIFY the
+  // change actually persisted to the backend before reporting success: setTaskStatus
+  // updates the UI optimistically and the shared update() swallows save errors, so a
+  // failed Supabase write would otherwise look successful. We read the authoritative
+  // row back and only show success when it truly became the target status.
   const changeStatus = async (t, value) => {
-    if (value === t.status) return
+    if (value === t.status || saving[t.id]) return
+
+    // Dependency blocking — check up front so we never optimistically show "Done"
+    // for a task that can't be completed yet.
     if (value === 'done' && isBlocked(t, tasks)) {
-      await setTaskStatus(t.id, value) // setTaskStatus surfaces the "blocked" toast
+      toast('Cannot mark Done — finish its dependency tasks first', 'error')
       return
     }
-    await setTaskStatus(t.id, value)
-    toast('Status updated')
+
+    setSaving((s) => ({ ...s, [t.id]: value }))
+    try {
+      await setTaskStatus(t.id, value) // optimistic UI + persist via the proven path
+      // Authoritative read-back from the backend (Supabase or local).
+      const rows = await db.getAll('tasks')
+      const saved = rows.find((r) => r.id === t.id)
+      if (saved && saved.status === value) {
+        toast(`Saved — marked ${STATUS_LABEL[value]}`, 'success')
+      } else {
+        toast('Server did not save the change — please retry', 'error')
+        await refresh() // re-sync the UI to the true backend state (no false "Done")
+      }
+    } catch (e) {
+      console.error('[GE agent status] save failed:', { taskId: t.id, target: value, message: e?.message, error: e })
+      toast('Could not save the status change — please retry', 'error')
+      await refresh()
+    } finally {
+      setSaving((s) => {
+        const n = { ...s }
+        delete n[t.id]
+        return n
+      })
+    }
   }
 
   // Append-only completion note → preserves the owner's existing notes.
@@ -199,18 +231,23 @@ export default function AgentDashboard() {
                     {/* Status update (the one editable control) */}
                     <div className="flex flex-wrap items-center gap-2 border-t border-border pt-3">
                       <span className="text-xs font-semibold text-muted">Set status:</span>
-                      {AGENT_STATUSES.map((s) => (
-                        <button
-                          key={s.value}
-                          onClick={() => changeStatus(t, s.value)}
-                          className={cn(
-                            'rounded-lg border px-3 py-1.5 text-xs font-semibold transition',
-                            t.status === s.value ? 'border-accent-500 bg-accent-500/10 text-accent-600' : 'border-border text-muted hover:text-fg',
-                          )}
-                        >
-                          {s.label}
-                        </button>
-                      ))}
+                      {AGENT_STATUSES.map((s) => {
+                        const savingThis = saving[t.id] === s.value
+                        return (
+                          <button
+                            key={s.value}
+                            onClick={() => changeStatus(t, s.value)}
+                            disabled={Boolean(saving[t.id])}
+                            className={cn(
+                              'inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition disabled:opacity-60',
+                              t.status === s.value ? 'border-accent-500 bg-accent-500/10 text-accent-600' : 'border-border text-muted hover:text-fg',
+                            )}
+                          >
+                            {savingThis && <Loader2 className="h-3 w-3 animate-spin" />}
+                            {s.label}
+                          </button>
+                        )
+                      })}
                       {t.status !== 'done' && isBlocked(t, tasks) && (
                         <span className="inline-flex items-center gap-1 text-xs text-amber-600">
                           <Lock className="h-3 w-3" /> blocked by dependencies
