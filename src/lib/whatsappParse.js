@@ -1,6 +1,6 @@
 // Lightweight, offline parser for pasted WhatsApp messages → a task draft.
-// Pure function, no network/APIs. Intentionally conservative: anything unclear
-// is left empty so the user fills it in manually (no aggressive guessing).
+// Pure function, no network/APIs. Intentionally conservative: it only *suggests*,
+// and the UI lets the user change everything before saving.
 import { addDays, setHours, setMinutes, setSeconds, setMilliseconds, startOfDay } from 'date-fns'
 
 const WEEKDAYS = {
@@ -20,9 +20,9 @@ export function parseWhatsApp(raw, now = new Date()) {
   const lower = text.toLowerCase()
   const detected = { date: false, time: false, urgent: false }
 
-  // ── Urgency ────────────────────────────────────────────────────────────────
-  const urgent = /\b(urgent|asap|emergency|immediately|right away)\b/.test(lower)
-  detected.urgent = urgent
+  // ── Urgency SUGGESTION (never forced — UI priority is fully editable) ────────
+  detected.urgent = /\b(urgent|asap|immediately|must do|high priority|today)\b/.test(lower)
+  const suggestedPriority = detected.urgent ? 'urgent' : 'normal'
 
   // ── Date (today / tonight / tomorrow / weekday names) ───────────────────────
   let baseDay = null
@@ -60,17 +60,14 @@ export function parseWhatsApp(raw, now = new Date()) {
   const hasTime = hour !== null && hour >= 0 && hour <= 23
   detected.time = hasTime
 
-  // ── Build a due date only from what was actually detected ───────────────────
+  // A detected date+time is only used to pre-fill the manual reminder (editable).
   let dueDate = null
   if (baseDay && hasTime) dueDate = atTime(baseDay, hour, minute)
-  else if (baseDay && !hasTime) dueDate = atTime(baseDay, 9, 0) // date but no time → 9am (editable)
+  else if (baseDay && !hasTime) dueDate = atTime(baseDay, 9, 0)
   else if (!baseDay && hasTime) {
     dueDate = atTime(startOfDay(now), hour, minute)
-    if (dueDate.getTime() < now.getTime()) dueDate = addDays(dueDate, 1) // time already passed today
+    if (dueDate.getTime() < now.getTime()) dueDate = addDays(dueDate, 1)
   }
-
-  // Suggest an "at due time" reminder only when a clear time was found; else manual.
-  const reminder = hasTime ? 'at_due' : 'none'
 
   // ── Title: first non-empty line, sentence-capped, ≤ 80 chars ────────────────
   const firstLine = text.split('\n').map((l) => l.trim()).find(Boolean) || text
@@ -81,16 +78,11 @@ export function parseWhatsApp(raw, now = new Date()) {
   if (title.length > 80) title = title.slice(0, 77).trimEnd() + '…'
   if (!title) title = 'WhatsApp task'
 
-  const tags = ['whatsapp']
-  if (urgent) tags.push('urgent')
-
   return {
     title,
     description: text, // full original message preserved
-    dueDate, // Date | null
-    reminder, // 'at_due' | 'none'
-    priority: urgent ? 'urgent' : 'medium',
-    tags,
+    dueDate, // Date | null (used only to pre-fill the manual reminder)
+    suggestedPriority, // 'urgent' | 'normal' (suggestion only)
     detected,
   }
 }
