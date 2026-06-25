@@ -18,12 +18,16 @@ import Meetings from './pages/Meetings'
 import Reports from './pages/Reports'
 import Settings from './pages/Settings'
 import QuickCapture from './pages/QuickCapture'
+import AgentDashboard from './pages/AgentDashboard'
 
 function AppShell() {
   const { loading } = useData()
   if (loading) return <PageLoader />
   return (
     <Routes>
+      {/* Limited Agent Dashboard — standalone (no admin sidebar/nav), behind login.
+          Intentionally NOT added to the Sidebar (unlinked) for Phase 1. */}
+      <Route path="agent" element={<AgentDashboard />} />
       <Route element={<Layout />}>
         <Route index element={<Dashboard />} />
         <Route path="tasks" element={<Tasks />} />
