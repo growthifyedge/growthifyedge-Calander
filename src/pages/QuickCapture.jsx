@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { MessageSquarePlus, PencilLine, Wand2, Check, Bell, AlertTriangle, Tag, Eraser, Sparkles, RotateCcw } from 'lucide-react'
+import { MessageSquarePlus, PencilLine, Wand2, Check, Bell, AlertTriangle, Tag, Eraser, Sparkles, RotateCcw, Paperclip, Image as ImageIcon, Film, X } from 'lucide-react'
 import { useData } from '../context/DataContext'
 import { useToast } from '../context/ToastContext'
 import { useQuickAdd } from '../context/QuickAddContext'
@@ -8,7 +8,23 @@ import { Button, Card } from '../components/ui'
 import { Field, Input, Textarea, Select } from '../components/ui/Form'
 import { ConfirmDialog } from '../components/ui/Modal'
 import { parseWhatsApp } from '../lib/whatsappParse'
-import { toDateTimeInput, fmtDateTime, cn } from '../lib/utils'
+import { toDateTimeInput, fmtDateTime, fmtBytes, fileKind, uid, cn } from '../lib/utils'
+
+// Attachment validation (images + videos only, with sane size caps).
+const ATTACH_ALLOWED_EXT = ['jpg', 'jpeg', 'png', 'webp', 'mp4', 'mov', 'webm']
+const ATTACH_VIDEO_EXT = ['mp4', 'mov', 'webm']
+const IMAGE_MAX = 10 * 1024 * 1024 // 10 MB
+const VIDEO_MAX = 50 * 1024 * 1024 // 50 MB
+function validateAttachment(file) {
+  const ext = (file.name.split('.').pop() || '').toLowerCase()
+  const isVideo = (file.type || '').startsWith('video/') || ATTACH_VIDEO_EXT.includes(ext)
+  if (!ATTACH_ALLOWED_EXT.includes(ext) && !(file.type || '').match(/^(image|video)\//)) {
+    return `Unsupported file: ${file.name} (allowed: jpg, png, webp, mp4, mov, webm)`
+  }
+  const max = isVideo ? VIDEO_MAX : IMAGE_MAX
+  if (file.size > max) return `${file.name} is too large (max ${isVideo ? '50' : '10'} MB)`
+  return null
+}
 
 const PRESET_CLIENTS = ['iSolutions Pakistan', 'Festigo Event Planner', 'Gain Shred Gym Mobile Shop']
 
@@ -113,7 +129,7 @@ const saveLast = (clientValue, draft) =>
 const clearLast = () => localStorage.removeItem(LAST_KEY)
 
 // Shared fields used by BOTH modes: priority, task type, reminder, tags preview.
-function CommonDraftFields({ draft, setDraft, resolved }) {
+function CommonDraftFields({ draft, setDraft, resolved, attachments, onAddFiles, onRemoveAttachment, uploadState }) {
   const setD = (k) => (e) => setDraft((d) => ({ ...d, [k]: e.target.value }))
   const type = TASK_TYPES.find((t) => t.value === draft.taskType)
   const srcTag = (SOURCES.find((s) => s.value === draft.source) || SOURCES[0]).tag
@@ -184,12 +200,51 @@ function CommonDraftFields({ draft, setDraft, resolved }) {
         {draft.priorityLevel === 'top' && <span className="chip bg-surface-2 text-muted"><Tag className="h-3 w-3" /> top-urgent</span>}
         {draft.taskType !== 'other' && <span className="chip bg-surface-2 text-muted"><Tag className="h-3 w-3" /> {draft.taskType}</span>}
       </div>
+
+      {/* Attach files (images / videos) — uploaded after the task is created */}
+      <div>
+        <span className="label">Attach files (images / videos)</span>
+        <div className="space-y-2">
+          {attachments.map(({ tmpId, file }) => {
+            const kind = fileKind(file.type, file.name)
+            const st = uploadState[tmpId]
+            return (
+              <div key={tmpId} className="flex items-center gap-2 rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm">
+                {kind === 'video' ? <Film className="h-4 w-4 shrink-0 text-muted" /> : <ImageIcon className="h-4 w-4 shrink-0 text-muted" />}
+                <span className="flex-1 truncate text-fg">{file.name}</span>
+                <span className="chip shrink-0 bg-surface text-muted">{kind}</span>
+                <span className="shrink-0 text-xs text-muted">{fmtBytes(file.size)}</span>
+                {st === 'uploading' && <span className="shrink-0 text-xs text-accent-600 dark:text-accent-400">uploading…</span>}
+                {st === 'done' && <Check className="h-4 w-4 shrink-0 text-emerald-500" />}
+                {st === 'error' && <span className="shrink-0 text-xs font-semibold text-red-500">failed</span>}
+                <button onClick={() => onRemoveAttachment(tmpId)} className="shrink-0 text-muted hover:text-red-500" aria-label="Remove file">
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            )
+          })}
+          <label className="flex cursor-pointer items-center justify-center gap-2 rounded-lg border border-dashed border-border px-3 py-2.5 text-sm font-medium text-muted transition hover:border-accent-400 hover:text-accent-600">
+            <Paperclip className="h-4 w-4" /> Add images or videos
+            <input
+              type="file"
+              multiple
+              accept="image/jpeg,image/png,image/webp,video/mp4,video/quicktime,video/webm"
+              className="hidden"
+              onChange={(e) => {
+                onAddFiles(e.target.files)
+                e.target.value = ''
+              }}
+            />
+          </label>
+          <p className="text-xs text-muted">Images up to 10 MB · videos up to 50 MB · jpg, png, webp, mp4, mov, webm.</p>
+        </div>
+      </div>
     </>
   )
 }
 
 export default function QuickTaskIntake() {
-  const { clients, create } = useData()
+  const { clients, create, uploadAttachment } = useData()
   const { toast } = useToast()
   const { open } = useQuickAdd()
 
@@ -199,11 +254,29 @@ export default function QuickTaskIntake() {
   const [draft, setDraft] = useState(null)
   const [saving, setSaving] = useState(false)
   const [confirmOpen, setConfirmOpen] = useState(false)
+  const [attachments, setAttachments] = useState([]) // [{ tmpId, file }]
+  const [uploadState, setUploadState] = useState({}) // { [tmpId]: 'uploading'|'done'|'error' }
 
   const existingNames = new Set(clients.map((c) => (c.company || '').trim().toLowerCase()))
   const presetOptions = PRESET_CLIENTS.filter((n) => !existingNames.has(n.trim().toLowerCase()))
 
   const setD = (k) => (e) => setDraft((d) => ({ ...d, [k]: e.target.value }))
+
+  const onAddFiles = (fileList) => {
+    const picked = Array.from(fileList || [])
+    const valid = []
+    for (const f of picked) {
+      const err = validateAttachment(f)
+      if (err) toast(err, 'error')
+      else valid.push({ tmpId: uid('att'), file: f })
+    }
+    if (valid.length) setAttachments((a) => [...a, ...valid])
+  }
+  const onRemoveAttachment = (tmpId) => setAttachments((a) => a.filter((x) => x.tmpId !== tmpId))
+  const clearAttachments = () => {
+    setAttachments([])
+    setUploadState({})
+  }
 
   // Resolve a client name → existing client id, or a "new:" value the save path creates.
   const clientValueForName = (name) => {
@@ -237,6 +310,7 @@ export default function QuickTaskIntake() {
     setMode(m)
     setRaw('')
     setConfirmOpen(false)
+    clearAttachments()
     if (m === 'manual') {
       const s = buildManualState()
       setClientSel(s.clientSel)
@@ -250,6 +324,7 @@ export default function QuickTaskIntake() {
   const reset = () => {
     setRaw('')
     setConfirmOpen(false)
+    clearAttachments()
     if (mode === 'manual') {
       const s = buildManualState()
       setClientSel(s.clientSel)
@@ -266,6 +341,7 @@ export default function QuickTaskIntake() {
     setMode('manual')
     setRaw('')
     setConfirmOpen(false)
+    clearAttachments()
     setClientSel(clientValueForName(preset.client))
     setDraft({
       title: '',
@@ -284,6 +360,7 @@ export default function QuickTaskIntake() {
     clearLast()
     setClientSel('')
     setDraft(blankManualDraft())
+    clearAttachments()
     toast('Defaults reset')
   }
 
@@ -352,13 +429,43 @@ export default function QuickTaskIntake() {
       const when = reminderDate()
       const clientId = await resolveClientId(true)
       const task = await create('tasks', buildPayload(clientId, when))
-      if (task) {
-        // Only Manual mode saves update the device-local "last used" defaults, so
-        // a pasted WhatsApp task never changes the manual workflow defaults.
-        if (mode === 'manual') saveLast(clientSel, draft)
-        toast('Task saved')
-        reset()
+      if (!task) return // task save failed — error already shown, nothing else to do
+
+      // Task exists → now upload attachments (separate `files` table + media bucket).
+      // A failed upload never removes the task; we report how many failed.
+      let failed = 0
+      for (const att of attachments) {
+        setUploadState((s) => ({ ...s, [att.tmpId]: 'uploading' }))
+        try {
+          await uploadAttachment(
+            {
+              name: att.file.name,
+              mime: att.file.type,
+              size: att.file.size,
+              kind: fileKind(att.file.type, att.file.name),
+              taskId: task.id,
+              clientId,
+            },
+            att.file,
+          )
+          setUploadState((s) => ({ ...s, [att.tmpId]: 'done' }))
+        } catch (e) {
+          console.error('[QuickTaskIntake] attachment upload failed:', e)
+          setUploadState((s) => ({ ...s, [att.tmpId]: 'error' }))
+          failed++
+        }
       }
+
+      // Only Manual mode saves update the device-local "last used" defaults, so
+      // a pasted WhatsApp task never changes the manual workflow defaults.
+      if (mode === 'manual') saveLast(clientSel, draft)
+
+      if (failed > 0) {
+        toast(`Task saved, but ${failed} attachment${failed > 1 ? 's' : ''} failed to upload`, 'error')
+      } else {
+        toast(attachments.length ? 'Task saved with attachments' : 'Task saved')
+      }
+      reset()
     } finally {
       setSaving(false)
     }
@@ -506,7 +613,15 @@ export default function QuickTaskIntake() {
                   <Textarea rows={4} value={draft.description} onChange={setD('description')} />
                 </Field>
 
-                <CommonDraftFields draft={draft} setDraft={setDraft} resolved={resolved} />
+                <CommonDraftFields
+                  draft={draft}
+                  setDraft={setDraft}
+                  resolved={resolved}
+                  attachments={attachments}
+                  onAddFiles={onAddFiles}
+                  onRemoveAttachment={onRemoveAttachment}
+                  uploadState={uploadState}
+                />
 
                 <div className="flex flex-wrap items-center justify-end gap-2 border-t border-border pt-4">
                   <Button variant="subtle" onClick={reset}>Discard</Button>
@@ -554,7 +669,15 @@ export default function QuickTaskIntake() {
                 <Textarea rows={3} value={draft.description} onChange={setD('description')} placeholder="Optional details…" />
               </Field>
 
-              <CommonDraftFields draft={draft} setDraft={setDraft} resolved={resolved} />
+              <CommonDraftFields
+                  draft={draft}
+                  setDraft={setDraft}
+                  resolved={resolved}
+                  attachments={attachments}
+                  onAddFiles={onAddFiles}
+                  onRemoveAttachment={onRemoveAttachment}
+                  uploadState={uploadState}
+                />
 
               <div className="flex flex-wrap items-center justify-end gap-2 border-t border-border pt-4">
                 <Button variant="subtle" onClick={reset}><Eraser className="h-4 w-4" /> Clear</Button>

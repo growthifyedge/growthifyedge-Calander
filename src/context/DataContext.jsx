@@ -288,6 +288,22 @@ export function DataProvider({ children }) {
     [userId, isLocal, logActivity],
   )
 
+  // Like addFile, but THROWS on storage/DB failure so callers can detect upload
+  // errors (used by Quick Task Intake attachments). Additive — addFile unchanged.
+  const uploadAttachment = useCallback(
+    async (meta, blob) => {
+      const id = uid('file')
+      const storagePath = isLocal ? id : `${userId}/${id}`
+      await db.saveBlob(storagePath, blob) // throws on failure
+      const record = { id, user_id: userId, storagePath, createdAt: nowISO(), ...meta }
+      await db.put('files', record) // throws on failure (no orphan blob record on save error)
+      setData((d) => ({ ...d, files: [record, ...d.files] }))
+      logActivity('file', 'uploaded', record.name || 'file')
+      return record
+    },
+    [userId, isLocal, logActivity],
+  )
+
   const removeFile = useCallback(
     async (id) => {
       const file = data.files.find((f) => f.id === id)
@@ -362,6 +378,7 @@ export function DataProvider({ children }) {
     removeClient,
     removeProject,
     addFile,
+    uploadAttachment,
     removeFile,
     getFileUrl,
     updateSettings,
