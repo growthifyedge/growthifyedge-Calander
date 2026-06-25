@@ -434,6 +434,7 @@ export default function QuickTaskIntake() {
       // Task exists → now upload attachments (separate `files` table + media bucket).
       // A failed upload never removes the task; we report how many failed.
       let failed = 0
+      let firstErr = null
       for (const att of attachments) {
         setUploadState((s) => ({ ...s, [att.tmpId]: 'uploading' }))
         try {
@@ -450,7 +451,15 @@ export default function QuickTaskIntake() {
           )
           setUploadState((s) => ({ ...s, [att.tmpId]: 'done' }))
         } catch (e) {
-          console.error('[QuickTaskIntake] attachment upload failed:', e)
+          // TEMP DEBUG: surface the exact Storage error so the cause is visible.
+          console.error('[GE attachment upload] failed:', {
+            file: att.file.name,
+            message: e?.message,
+            statusCode: e?.statusCode ?? e?.status,
+            name: e?.name,
+            error: e,
+          })
+          firstErr = firstErr || e?.message || String(e)
           setUploadState((s) => ({ ...s, [att.tmpId]: 'error' }))
           failed++
         }
@@ -461,7 +470,7 @@ export default function QuickTaskIntake() {
       if (mode === 'manual') saveLast(clientSel, draft)
 
       if (failed > 0) {
-        toast(`Task saved, but ${failed} attachment${failed > 1 ? 's' : ''} failed to upload`, 'error')
+        toast(`Task saved, but ${failed} attachment${failed > 1 ? 's' : ''} failed: ${firstErr || 'unknown error'}`, 'error')
       } else {
         toast(attachments.length ? 'Task saved with attachments' : 'Task saved')
       }
