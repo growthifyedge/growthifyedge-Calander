@@ -5,6 +5,30 @@
 import { createClient } from '@supabase/supabase-js'
 import webpush from 'web-push'
 
+// ── Notification text helpers (content only — no effect on send logic) ───────
+const STATUS_LABEL = { pending: 'Pending', in_progress: 'In Progress', review: 'In Review', done: 'Completed' }
+const priorityLabel = (priority, tags) => {
+  if (priority === 'urgent') return Array.isArray(tags) && tags.includes('top-urgent') ? 'Top Urgent' : 'Urgent'
+  if (priority === 'high') return 'Urgent'
+  if (priority === 'medium') return 'Normal'
+  if (priority === 'low') return 'Low'
+  return null
+}
+// Title: "Reminder: <task>" · Body: "Status: X · Priority: Y · Client: Z"
+// Client is included only when a name is available.
+const buildReminderText = (task, clientName) => {
+  const parts = []
+  const status = STATUS_LABEL[task.status] || task.status
+  if (status) parts.push(`Status: ${status}`)
+  const prio = priorityLabel(task.priority, task.tags)
+  if (prio) parts.push(`Priority: ${prio}`)
+  if (clientName) parts.push(`Client: ${clientName}`)
+  return {
+    title: `Reminder: ${task.title || 'Task'}`,
+    body: parts.length ? parts.join(' · ') : task.title || 'You have a task reminder.',
+  }
+}
+
 export default async function handler(req, res) {
   if (req.method !== 'GET' && req.method !== 'POST') {
     res.setHeader('Allow', 'GET, POST')
@@ -32,7 +56,7 @@ export default async function handler(req, res) {
     // 1. Due, unsent reminders (cap per run).
     const { data: tasks, error: tasksErr } = await supabase
       .from('tasks')
-      .select('id, title, description, user_id, reminder_time')
+      .select('id, title, description, user_id, reminder_time, status, priority, tags, client_id')
       .not('reminder_time', 'is', null)
       .eq('reminder_sent', false)
       .lte('reminder_time', now)
@@ -46,16 +70,19 @@ export default async function handler(req, res) {
     if (subsErr) throw subsErr
     const subscriptions = allSubs || []
 
+    // Client names for notification context — loaded once, non-fatal if it fails
+    // (then notifications fall back to status + priority only).
+    let clientName = {}
+    const { data: clientRows, error: clientErr } = await supabase.from('clients').select('id, company')
+    if (!clientErr && clientRows) clientName = Object.fromEntries(clientRows.map((c) => [c.id, c.company]))
+
     for (const task of tasks || []) {
       // Multi-device: send every due reminder to ALL active subscriptions
       // (no user_id filtering yet — that comes in a later step).
       const targets = subscriptions.filter((s) => !expired.has(s.endpoint))
 
-      const payload = JSON.stringify({
-        title: 'Reminder',
-        body: task.title || 'You have a task reminder.',
-        url: '/',
-      })
+      const { title, body } = buildReminderText(task, task.client_id ? clientName[task.client_id] : null)
+      const payload = JSON.stringify({ title, body, url: '/' })
 
       for (const sub of targets) {
         try {

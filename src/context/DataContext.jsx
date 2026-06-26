@@ -345,7 +345,6 @@ export function DataProvider({ children }) {
       // Build a minimal, status-only payload merged onto the existing row (so
       // user_id etc. are preserved for RLS). No reminder fields are touched.
       const payload = { ...prev, status, completedAt: status === 'done' ? nowISO() : null, updatedAt: nowISO() }
-      console.log('[GE status DEBUG] saving', { id, before: prev.status, target: status, payloadStatus: payload.status })
 
       // Optimistic UI.
       setData((d) => ({ ...d, tasks: d.tasks.map((t) => (t.id === id ? payload : t)) }))
@@ -354,14 +353,11 @@ export function DataProvider({ children }) {
       try {
         savedRow = await db.put('tasks', payload) // returns the persisted row (Supabase .select()/local record)
       } catch (e) {
-        console.error('[GE status DEBUG] db.put threw', { id, target: status, code: e?.code, message: e?.message, details: e?.details, hint: e?.hint })
         setData((d) => ({ ...d, tasks: d.tasks.map((t) => (t.id === id ? prev : t)) })) // revert
         throw e
       }
 
       const returnedStatus = savedRow?.status ?? null
-      console.log('[GE status DEBUG] backend returned', { id, returnedStatus, ok: returnedStatus === status })
-
       if (returnedStatus !== status) {
         setData((d) => ({ ...d, tasks: d.tasks.map((t) => (t.id === id ? prev : t)) })) // revert
         throw new Error(`Backend returned status "${returnedStatus ?? 'no row'}" after requesting "${status}"`)

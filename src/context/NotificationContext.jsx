@@ -16,6 +16,26 @@ const dev = import.meta.env.DEV
 // NOTE: notification logs intentionally run in PRODUCTION too (temporary debugging).
 const log = (...a) => console.log('[GE notif]', ...a)
 
+// ── Reminder notification text (content only) ────────────────────────────────
+const STATUS_LABEL = { pending: 'Pending', in_progress: 'In Progress', review: 'In Review', done: 'Completed' }
+const priorityLabel = (priority, tags) => {
+  if (priority === 'urgent') return (tags || []).includes('top-urgent') ? 'Top Urgent' : 'Urgent'
+  if (priority === 'high') return 'Urgent'
+  if (priority === 'medium') return 'Normal'
+  if (priority === 'low') return 'Low'
+  return null
+}
+// Body: "Status: X · Priority: Y · Client: Z" (Client included only when known).
+const reminderBodyFor = (t, clientName) => {
+  const parts = []
+  const status = STATUS_LABEL[t.status] || t.status
+  if (status) parts.push(`Status: ${status}`)
+  const prio = priorityLabel(t.priority, t.tags)
+  if (prio) parts.push(`Priority: ${prio}`)
+  if (clientName) parts.push(`Client: ${clientName}`)
+  return parts.length ? parts.join(' · ') : t.title || 'Task reminder'
+}
+
 export function NotificationProvider({ children }) {
   const { tasks, clientById } = useData()
   const { toast } = useToast()
@@ -140,7 +160,7 @@ export function NotificationProvider({ children }) {
   useEffect(() => {
     if (!supported) return
 
-    const fireOnce = async (key, title, body) => {
+    const fireOnce = async (key, title, body, toastText) => {
       if (firedRef.current.has(key)) return
       firedRef.current.add(key)
       persistFired()
@@ -148,8 +168,7 @@ export function NotificationProvider({ children }) {
       log('fired', { key, title, browserOk: res.ok, reason: res.reason })
       // Always surface an in-app toast — this is the fallback if the browser
       // notification fails for any reason, and confirms the scheduler triggered.
-      const taskName = body.split('\n')[0]
-      toast(`🔔 ${title.replace(/^[^\w]+/, '')}: ${taskName}`, res.ok ? 'info' : 'error')
+      toast(`🔔 ${toastText || title}`, res.ok ? 'info' : 'error')
     }
     const crossed = (time, since, now) => time != null && time > since && time <= now
 
@@ -164,13 +183,15 @@ export function NotificationProvider({ children }) {
         if (t.status === 'done' || !t.dueDate) continue
         const due = toDate(t.dueDate)?.getTime()
         if (!due) continue
-        const client = clientById[t.clientId]?.company || 'Internal'
-        const body = `${t.title}\n${client}\nDue ${fmtDateTime(t.dueDate)}`
+        const clientName = clientById[t.clientId]?.company
+        const client = clientName || 'Internal'
+        const dueBody = `${t.title}\n${client}\nDue ${fmtDateTime(t.dueDate)}`
+        const reminderBody = reminderBodyFor(t, clientName)
 
         const rt = reminderFireTime(t)?.getTime()
-        if (crossed(rt, since, now)) fireOnce(`${t.id}|reminder|${rt}`, 'GrowthifyEdge OS Reminder', body)
-        if (crossed(due, since, now)) fireOnce(`${t.id}|due|${due}`, '⏰ Task due now', body)
-        if (crossed(due + 60000, since, now)) fireOnce(`${t.id}|overdue|${due}`, '⚠️ Task overdue', body)
+        if (crossed(rt, since, now)) fireOnce(`${t.id}|reminder|${rt}`, `Reminder: ${t.title}`, reminderBody, `Reminder: ${t.title}`)
+        if (crossed(due, since, now)) fireOnce(`${t.id}|due|${due}`, '⏰ Task due now', dueBody, `Task due now: ${t.title}`)
+        if (crossed(due + 60000, since, now)) fireOnce(`${t.id}|overdue|${due}`, '⚠️ Task overdue', dueBody, `Task overdue: ${t.title}`)
       }
       lastCheckRef.current = now
     }

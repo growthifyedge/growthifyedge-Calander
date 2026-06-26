@@ -84,15 +84,13 @@ export default function AgentDashboard() {
 
     setSaving((s) => ({ ...s, [t.id]: value }))
     setErrors((er) => { const n = { ...er }; delete n[t.id]; return n }) // clear prior error
-    console.log('[GE agent status] click', { taskId: t.id, before: t.status, target: value })
     try {
       const saved = await saveTaskStatusStrict(t.id, value) // throws on any failure; confirms via returned row
       toast(`Saved — marked ${STATUS_LABEL[saved.status]}`, 'success')
     } catch (e) {
-      // Exact, debuggable failure reason (RLS, constraint, network, etc.).
+      // Exact, user-facing failure reason (RLS, constraint, network, etc.).
       const reason = e?.message || e?.details || e?.hint || (typeof e === 'string' ? e : JSON.stringify(e))
       const reason2 = e?.code ? `[${e.code}] ${reason}` : reason
-      console.error('[GE agent status] save failed:', { taskId: t.id, target: value, code: e?.code, message: e?.message, details: e?.details, hint: e?.hint, error: e })
       setErrors((er) => ({ ...er, [t.id]: reason2 }))
       toast(`Save failed: ${reason2}`, 'error')
       await refresh() // re-sync UI so it reflects the true backend state
