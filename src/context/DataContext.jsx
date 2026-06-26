@@ -325,6 +325,57 @@ export function DataProvider({ children }) {
     [data.tasks, update, spawnNextOccurrence, toast],
   )
 
+  // ── Strict status save (used by Agent Dashboard) ────────────────────────────
+  // Reliability-first: writes the status fields, targets by id, and CONFIRMS using
+  // the row the adapter returns from the write itself (Supabase upsert `.select()`
+  // is part of the same statement → always consistent), instead of a separate
+  // read-back query that can race read-after-write under connection pooling.
+  // Optimistic update is reverted on any failure, and the real error is rethrown.
+  const saveTaskStatusStrict = useCallback(
+    async (id, status) => {
+      const prev = data.tasks.find((t) => t.id === id)
+      if (!prev) throw new Error('Task not found in current data')
+
+      // Dependency blocking only applies to completion.
+      if (status === 'done') {
+        const blockers = (prev.dependencies || []).filter((depId) => data.tasks.find((t) => t.id === depId)?.status !== 'done')
+        if (blockers.length) throw new Error(`Blocked — finish ${blockers.length} dependency task${blockers.length > 1 ? 's' : ''} first`)
+      }
+
+      // Build a minimal, status-only payload merged onto the existing row (so
+      // user_id etc. are preserved for RLS). No reminder fields are touched.
+      const payload = { ...prev, status, completedAt: status === 'done' ? nowISO() : null, updatedAt: nowISO() }
+      console.log('[GE status DEBUG] saving', { id, before: prev.status, target: status, payloadStatus: payload.status })
+
+      // Optimistic UI.
+      setData((d) => ({ ...d, tasks: d.tasks.map((t) => (t.id === id ? payload : t)) }))
+
+      let savedRow
+      try {
+        savedRow = await db.put('tasks', payload) // returns the persisted row (Supabase .select()/local record)
+      } catch (e) {
+        console.error('[GE status DEBUG] db.put threw', { id, target: status, code: e?.code, message: e?.message, details: e?.details, hint: e?.hint })
+        setData((d) => ({ ...d, tasks: d.tasks.map((t) => (t.id === id ? prev : t)) })) // revert
+        throw e
+      }
+
+      const returnedStatus = savedRow?.status ?? null
+      console.log('[GE status DEBUG] backend returned', { id, returnedStatus, ok: returnedStatus === status })
+
+      if (returnedStatus !== status) {
+        setData((d) => ({ ...d, tasks: d.tasks.map((t) => (t.id === id ? prev : t)) })) // revert
+        throw new Error(`Backend returned status "${returnedStatus ?? 'no row'}" after requesting "${status}"`)
+      }
+
+      // Confirmed — sync shared state from the authoritative returned row.
+      setData((d) => ({ ...d, tasks: d.tasks.map((t) => (t.id === id ? { ...t, ...savedRow } : t)) }))
+      if (status === 'done' && prev.recurrence && prev.recurrence !== 'none') await spawnNextOccurrence(prev)
+      logActivity('task', status === 'done' ? 'completed' : 'updated', savedRow.title || prev.title || 'task')
+      return savedRow
+    },
+    [data.tasks, spawnNextOccurrence, logActivity],
+  )
+
   // ── Files (record + blob in storage) ────────────────────────────────────────
   const addFile = useCallback(
     async (meta, blob) => {
@@ -427,6 +478,7 @@ export function DataProvider({ children }) {
     bulkUpdate,
     bulkRemove,
     setTaskStatus,
+    saveTaskStatusStrict,
     isBlocked,
     removeClient,
     removeProject,

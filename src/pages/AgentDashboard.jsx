@@ -2,7 +2,6 @@ import { useMemo, useState } from 'react'
 import { ListChecks, CalendarClock, Lock, ShieldCheck, Loader2, AlertTriangle } from 'lucide-react'
 import { useData } from '../context/DataContext'
 import { useToast } from '../context/ToastContext'
-import { db } from '../lib/db'
 import { Card, EmptyState } from '../components/ui'
 import { Select } from '../components/ui/Form'
 import { TaskStatusBadge, PriorityBadge, ReminderChip } from '../components/ui/Badge'
@@ -36,7 +35,7 @@ const tagLabel = (tags, map) => {
 }
 
 export default function AgentDashboard() {
-  const { tasks, clients, files, clientById, setTaskStatus, update, isBlocked, refresh } = useData()
+  const { tasks, clients, files, clientById, saveTaskStatusStrict, update, isBlocked, refresh } = useData()
   const { toast } = useToast()
   const [filter, setFilter] = useState('active')
   const [clientId, setClientId] = useState('')
@@ -68,15 +67,14 @@ export default function AgentDashboard() {
     return [...list].sort((a, b) => new Date(a.dueDate || '2999') - new Date(b.dueDate || '2999'))
   }, [tasks, filter, clientId])
 
-  // Update status only. We use the STRICT path (setTaskStatus(..., { strict: true })),
-  // which makes the shared update()/db.put rethrow the real backend error instead of
-  // swallowing it — so we can show the EXACT failure reason. We then read the row back
-  // from the backend and only report success when it truly became the target status.
+  // Update status using the dedicated strict helper, which writes via the SAME
+  // db.put the admin side uses and CONFIRMS against the row the write returns
+  // (not a separate read-back query that can race read-after-write). It throws
+  // on any failure with the exact reason, and reverts its optimistic change.
   const changeStatus = async (t, value) => {
     if (value === t.status || saving[t.id]) return
 
-    // Dependency blocking — check up front so we never optimistically show "Done"
-    // for a task that can't be completed yet.
+    // Dependency blocking — clear message up front (helper also guards as a backstop).
     if (value === 'done' && isBlocked(t, tasks)) {
       const msg = 'Cannot mark Done — finish its dependency tasks first'
       setErrors((er) => ({ ...er, [t.id]: msg }))
@@ -86,19 +84,10 @@ export default function AgentDashboard() {
 
     setSaving((s) => ({ ...s, [t.id]: value }))
     setErrors((er) => { const n = { ...er }; delete n[t.id]; return n }) // clear prior error
+    console.log('[GE agent status] click', { taskId: t.id, before: t.status, target: value })
     try {
-      await setTaskStatus(t.id, value, { strict: true }) // throws the REAL error on failure
-      // Authoritative read-back from the backend (Supabase or local).
-      const rows = await db.getAll('tasks')
-      const saved = rows.find((r) => r.id === t.id)
-      if (saved && saved.status === value) {
-        toast(`Saved — marked ${STATUS_LABEL[value]}`, 'success')
-      } else {
-        const msg = `Save did not stick — backend still shows "${saved?.status ?? 'unknown'}".`
-        setErrors((er) => ({ ...er, [t.id]: msg }))
-        toast(msg, 'error')
-        await refresh() // re-sync the UI to the true backend state (no false status)
-      }
+      const saved = await saveTaskStatusStrict(t.id, value) // throws on any failure; confirms via returned row
+      toast(`Saved — marked ${STATUS_LABEL[saved.status]}`, 'success')
     } catch (e) {
       // Exact, debuggable failure reason (RLS, constraint, network, etc.).
       const reason = e?.message || e?.details || e?.hint || (typeof e === 'string' ? e : JSON.stringify(e))
@@ -106,7 +95,7 @@ export default function AgentDashboard() {
       console.error('[GE agent status] save failed:', { taskId: t.id, target: value, code: e?.code, message: e?.message, details: e?.details, hint: e?.hint, error: e })
       setErrors((er) => ({ ...er, [t.id]: reason2 }))
       toast(`Save failed: ${reason2}`, 'error')
-      await refresh() // re-sync UI so it reflects the true (unchanged) backend state
+      await refresh() // re-sync UI so it reflects the true backend state
     } finally {
       setSaving((s) => {
         const n = { ...s }
