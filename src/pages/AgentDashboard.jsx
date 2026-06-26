@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { ListChecks, CalendarClock, Lock, ShieldCheck, Loader2 } from 'lucide-react'
+import { ListChecks, CalendarClock, Lock, ShieldCheck, Loader2, AlertTriangle } from 'lucide-react'
 import { useData } from '../context/DataContext'
 import { useToast } from '../context/ToastContext'
 import { db } from '../lib/db'
@@ -43,6 +43,7 @@ export default function AgentDashboard() {
   const [previewFile, setPreviewFile] = useState(null)
   const [noteDrafts, setNoteDrafts] = useState({})
   const [saving, setSaving] = useState({}) // { [taskId]: targetStatus } while a save is in flight
+  const [errors, setErrors] = useState({}) // { [taskId]: exact failure message } shown inline
 
   const filtered = useMemo(() => {
     const list = tasks.filter((t) => {
@@ -67,38 +68,45 @@ export default function AgentDashboard() {
     return [...list].sort((a, b) => new Date(a.dueDate || '2999') - new Date(b.dueDate || '2999'))
   }, [tasks, filter, clientId])
 
-  // Update status only — reuses the existing setTaskStatus (handles completedAt &
-  // recurrence). No other task fields are editable here. Critically, we VERIFY the
-  // change actually persisted to the backend before reporting success: setTaskStatus
-  // updates the UI optimistically and the shared update() swallows save errors, so a
-  // failed Supabase write would otherwise look successful. We read the authoritative
-  // row back and only show success when it truly became the target status.
+  // Update status only. We use the STRICT path (setTaskStatus(..., { strict: true })),
+  // which makes the shared update()/db.put rethrow the real backend error instead of
+  // swallowing it — so we can show the EXACT failure reason. We then read the row back
+  // from the backend and only report success when it truly became the target status.
   const changeStatus = async (t, value) => {
     if (value === t.status || saving[t.id]) return
 
     // Dependency blocking — check up front so we never optimistically show "Done"
     // for a task that can't be completed yet.
     if (value === 'done' && isBlocked(t, tasks)) {
-      toast('Cannot mark Done — finish its dependency tasks first', 'error')
+      const msg = 'Cannot mark Done — finish its dependency tasks first'
+      setErrors((er) => ({ ...er, [t.id]: msg }))
+      toast(msg, 'error')
       return
     }
 
     setSaving((s) => ({ ...s, [t.id]: value }))
+    setErrors((er) => { const n = { ...er }; delete n[t.id]; return n }) // clear prior error
     try {
-      await setTaskStatus(t.id, value) // optimistic UI + persist via the proven path
+      await setTaskStatus(t.id, value, { strict: true }) // throws the REAL error on failure
       // Authoritative read-back from the backend (Supabase or local).
       const rows = await db.getAll('tasks')
       const saved = rows.find((r) => r.id === t.id)
       if (saved && saved.status === value) {
         toast(`Saved — marked ${STATUS_LABEL[value]}`, 'success')
       } else {
-        toast('Server did not save the change — please retry', 'error')
-        await refresh() // re-sync the UI to the true backend state (no false "Done")
+        const msg = `Save did not stick — backend still shows "${saved?.status ?? 'unknown'}".`
+        setErrors((er) => ({ ...er, [t.id]: msg }))
+        toast(msg, 'error')
+        await refresh() // re-sync the UI to the true backend state (no false status)
       }
     } catch (e) {
-      console.error('[GE agent status] save failed:', { taskId: t.id, target: value, message: e?.message, error: e })
-      toast('Could not save the status change — please retry', 'error')
-      await refresh()
+      // Exact, debuggable failure reason (RLS, constraint, network, etc.).
+      const reason = e?.message || e?.details || e?.hint || (typeof e === 'string' ? e : JSON.stringify(e))
+      const reason2 = e?.code ? `[${e.code}] ${reason}` : reason
+      console.error('[GE agent status] save failed:', { taskId: t.id, target: value, code: e?.code, message: e?.message, details: e?.details, hint: e?.hint, error: e })
+      setErrors((er) => ({ ...er, [t.id]: reason2 }))
+      toast(`Save failed: ${reason2}`, 'error')
+      await refresh() // re-sync UI so it reflects the true (unchanged) backend state
     } finally {
       setSaving((s) => {
         const n = { ...s }
@@ -254,6 +262,14 @@ export default function AgentDashboard() {
                         </span>
                       )}
                     </div>
+
+                    {/* Inline save error — exact failure reason (RLS, constraint, network…) */}
+                    {errors[t.id] && (
+                      <p className="-mt-1 flex items-start gap-1.5 rounded-lg bg-red-50 px-2.5 py-1.5 text-xs font-medium text-red-700 dark:bg-red-500/10 dark:text-red-300">
+                        <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                        <span className="break-words">{errors[t.id]}</span>
+                      </p>
+                    )}
 
                     {/* Completion note (append-only to existing notes field) */}
                     <div className="flex gap-2">

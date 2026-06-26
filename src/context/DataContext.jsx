@@ -175,6 +175,9 @@ export function DataProvider({ children }) {
           await db.put(collection, updated)
         } catch (e) {
           console.error(`[DataContext] failed to update ${collection}:`, e)
+          // Strict callers (e.g. Agent Dashboard) want the REAL error to surface
+          // so they can display the exact failure reason instead of a generic toast.
+          if (opts.strict) throw e
           toast?.('Could not save changes — please retry', 'error')
         }
       }
@@ -296,21 +299,27 @@ export function DataProvider({ children }) {
   )
 
   const setTaskStatus = useCallback(
-    async (id, status) => {
+    async (id, status, opts = {}) => {
       const task = data.tasks.find((t) => t.id === id)
-      if (!task) return
+      if (!task) {
+        if (opts.strict) throw new Error('Task not found in current data')
+        return
+      }
       if (status === 'done') {
         const blockers = (task.dependencies || []).filter((depId) => {
           const dep = data.tasks.find((t) => t.id === depId)
           return dep && dep.status !== 'done'
         })
         if (blockers.length) {
-          toast?.(`Blocked — finish ${blockers.length} dependency task${blockers.length > 1 ? 's' : ''} first`, 'error')
+          const msg = `Blocked — finish ${blockers.length} dependency task${blockers.length > 1 ? 's' : ''} first`
+          if (opts.strict) throw new Error(msg)
+          toast?.(msg, 'error')
           return
         }
       }
       const patch = { status, completedAt: status === 'done' ? nowISO() : null }
-      await update('tasks', id, patch, { activity: status === 'done' ? 'completed' : undefined })
+      // opts.strict makes the underlying update() rethrow the real persistence error.
+      await update('tasks', id, patch, { activity: status === 'done' ? 'completed' : undefined, strict: opts.strict })
       if (status === 'done' && task.recurrence && task.recurrence !== 'none') await spawnNextOccurrence(task)
     },
     [data.tasks, update, spawnNextOccurrence, toast],
